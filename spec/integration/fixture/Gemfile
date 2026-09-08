@@ -1,0 +1,17 @@
+source 'https://rubygems.org'
+
+# The gem under test, from the repository the image is built from. The build
+# context is the gem root, so the path is relative to it — see Dockerfile.
+gem 'kicks_liveness', path: '../../..'
+
+# One worker gem, never both: see docs/LIMITATIONS.md. Switchable so the
+# fixture can be pointed at the other line without editing this file.
+case ENV.fetch('AMQP_WORKER_GEM', 'kicks')
+when 'kicks' then gem 'kicks', '~> 3.0'
+when 'sneakers' then gem 'sneakers', '~> 2.11'
+else raise "AMQP_WORKER_GEM: expected kicks or sneakers, got #{ENV['AMQP_WORKER_GEM'].inspect}"
+end
+
+# Pulled in by the worker gem anyway; named here so the fixture fails loudly at
+# bundle time rather than at subscribe time if that ever stops being true.
+gem 'bunny'

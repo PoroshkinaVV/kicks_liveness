@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  gate:
+    name: spec (${{ matrix.worker_gem }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        worker_gem: [kicks, sneakers]
+    env:
+      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          cache-version: ${{ matrix.worker_gem }}
+      - name: Tag matches gem version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(ruby -Ilib -r kicks_liveness/version -e 'print KicksLiveness::VERSION')"
+          if [ "$tag" != "$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match KicksLiveness::VERSION ${version}"
+            exit 1
+          fi
+
+      - run: bundle exec rspec
+
+  push:
+    name: Push gem to RubyGems.org
+    needs: gate
+    runs-on: ubuntu-latest
+
+    # Must match the trusted publisher's Environment field on RubyGems.org.
+    environment: release
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          cache-version: kicks
+      - uses: rubygems/release-gem@v1

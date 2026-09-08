@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  spec:
+    # The gem declares neither `kicks` nor `sneakers` as a dependency, so the
+    # suite has to pass against both: the Gemfile picks one by AMQP_WORKER_GEM.
+    # They also drag in different bunny majors (kicks 3.4 -> bunny 3.x, sneakers
+    # 2.11 -> bunny 2.x), so this matrix is what checks that the predicate finds
+    # the same in-memory API on either one.
+    name: spec (ruby ${{ matrix.ruby }}, ${{ matrix.worker_gem }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.1', '3.2', '3.3', '3.4', '4.0', 'head']
+        worker_gem: [kicks, sneakers]
+        exclude:
+          - ruby: head
+            worker_gem: sneakers
+    continue-on-error: ${{ matrix.ruby == 'head' }}
+    env:
+      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          cache-version: ${{ matrix.worker_gem }}
+
+      - run: bundle exec rspec
+
+  floor:
+    # The `~>` constraints in the Gemfile resolve to the newest release, so the
+    # matrix above proves the newest works and says nothing about the oldest.
+    # This job pins the floor the gemspec and the docs promise. It has to be a
+    # separate job rather than an `include:` on the matrix: an include whose
+    # existing keys match a combination extends that job instead of adding one,
+    # so the plain ruby 3.1 runs would have been replaced rather than joined.
+    #
+    # kicks 3.0.0 resolves bunny 2.x while kicks 3.4 resolves 3.x, so this also
+    # covers the predicate against both bunny majors from the kicks side.
+    name: floor (${{ matrix.worker_gem }} ${{ matrix.worker_gem_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - worker_gem: kicks
+            worker_gem_version: '3.0.0'
+          - worker_gem: sneakers
+            worker_gem_version: '2.11.0'
+    env:
+      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
+      AMQP_WORKER_GEM_VERSION: ${{ matrix.worker_gem_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+          bundler-cache: true
+          cache-version: floor-${{ matrix.worker_gem }}
+
+      - run: bundle exec rspec
+
+  rubocop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          cache-version: kicks
+
+      - run: bundle exec rubocop

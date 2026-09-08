@@ -1,0 +1,59 @@
+# The fixture worker. Probe values are copied verbatim from
+# docs/KUBERNETES.md, so a scenario that passes here also confirms the example
+# printed in the documentation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    app: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: kicks-liveness-fixture:latest
+          # Built straight into the Docker Desktop engine that backs this
+          # cluster; there is no registry to pull from.
+          imagePullPolicy: Never
+          env:
+            - name: AMQP_URL
+              value: amqp://guest:guest@rabbitmq:5672
+            # Number of forks. Scenario 8 raises it to 2, which needs no rebuild:
+            # the rake task turns it into config[:workers].
+            - name: WORKER_COUNT
+              value: "1"
+
+          startupProbe:
+            exec:
+              command: ["bundle", "exec", "kicks-liveness"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+
+          livenessProbe:
+            exec:
+              command: ["bundle", "exec", "kicks-liveness"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - mountPath: /opt/app/tmp
+              name: app-tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: app-tmp
+          emptyDir:
+            medium: Memory        # without this the mark lands on a disk

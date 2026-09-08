@@ -1,0 +1,6 @@
+# `sneakers/tasks` declares `task :environment` empty on purpose; rake
+# accumulates blocks, so adding ours here is the documented way to load an
+# application without Rails.
+require 'sneakers/tasks'
+
+task(:environment) { require_relative 'app' }

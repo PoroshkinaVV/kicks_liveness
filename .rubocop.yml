@@ -1,0 +1,35 @@
+---
+plugins:
+  - rubocop-rspec
+
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  Exclude:
+    - 'exe/**/*'
+    - 'vendor/**/*'
+
+Style/Documentation:
+  Enabled: false
+
+Style/FrozenStringLiteralComment:
+  Enabled: false
+
+Layout/LineLength:
+  Max: 140
+  AllowedPatterns: ['\A#']
+
+Metrics/MethodLength:
+  Max: 30
+
+RSpec/MultipleExpectations:
+  Max: 5
+
+RSpec/ExampleLength:
+  Max: 15
+
+# The probe is a script, not a class: its only contract with the kubelet is an
+# exit code and stdout, so the spec describes process behaviour, not a constant.
+RSpec/DescribeClass:
+  Exclude:
+    - 'spec/probe_spec.rb'

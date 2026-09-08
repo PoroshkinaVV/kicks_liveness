@@ -1,0 +1,13 @@
+--markup markdown
+--readme README.md
+--title "kicks_liveness"
+--no-private
+lib/**/*.rb
+-
+docs/SETUP.md
+docs/DESIGN.md
+docs/KUBERNETES.md
+docs/LIMITATIONS.md
+docs/VERIFYING.md
+CHANGELOG.md
+LICENSE.txt
