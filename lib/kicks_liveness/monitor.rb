@@ -173,6 +173,12 @@ module KicksLiveness
 
     def log(level, message)
       @config.resolved_logger&.public_send(level, "[liveness] slot #{@slot}: #{message}")
+    rescue StandardError
+      # Logging is diagnostic, while the heartbeat is the liveness contract. A
+      # broken custom logger must not prevent a mark from being written or kill
+      # the only thread that can refresh it. There is deliberately no fallback
+      # log here: calling the same logger again would only repeat the failure.
+      nil
     end
   end
 end

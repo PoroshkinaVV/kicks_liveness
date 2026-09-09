@@ -10,7 +10,7 @@ having both is worse than it looks.
 
 Those two floors are exact, not aspirational: CI runs the suite against
 `kicks 3.0.0` and `sneakers 2.11.0` pinned, alongside the matrix that tracks the
-newest release of each. A `~>` matrix on its own would only ever prove that the
+current release of each. A `~>` matrix on its own would only ever prove that the
 latest version works.
 
 ```ruby
@@ -142,12 +142,15 @@ Set it only to point somewhere **other** than `Sneakers.logger`:
 config.logger = Rails.logger
 ```
 
-| Option | Default | |
-|---|---|---|
-| `logger` | `Sneakers.logger`, resolved lazily | where transitions are logged |
-| `enabled` | `true` | set to `false` in tests, so no thread is started |
-| `tick` | `10` | seconds between checks |
-| `startup_grace_ticks` | `6` | unhealthy ticks tolerated at startup before one ERROR |
+| Option | Default | Purpose | Valid values |
+|---|---|---|---|
+| `logger` | `Sneakers.logger`, resolved lazily | transition and error logs | logger-compatible object |
+| `enabled` | `true` | start the monitor thread | `true` or `false` |
+| `tick` | `10` | seconds between checks | positive number smaller than `max_age` |
+| `startup_grace_ticks` | `6` | unhealthy startup ticks before one ERROR | positive integer |
+
+Invalid combinations are rejected before the monitor starts instead of running
+one that is guaranteed to publish stale marks or never report a stalled startup.
 
 `dir` and `max_age` are **not** here — they come from environment variables
 only. See

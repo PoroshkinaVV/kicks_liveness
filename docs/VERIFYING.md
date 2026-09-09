@@ -30,14 +30,23 @@ it takes.
 
 ```bash
 spec/integration/verify.sh build   # image, into the engine the cluster uses
+spec/integration/verify.sh status  # print and verify the exact target
 spec/integration/verify.sh up      # namespace, broker, worker
 spec/integration/verify.sh down    # deletes the namespace
 ```
 
-Every `kubectl` call in that script names its context and namespace explicitly.
-That is not politeness: a liveness experiment deletes queues and kills pods, and
-it must not be able to reach a real cluster because someone's current-context
-happened to point at one.
+Every `kubectl` call names its context and namespace explicitly, so the script
+never falls back to `current-context`. It will still operate on whichever target
+you configure: run `status` and inspect both values before `up` or `down`. The
+script labels namespaces it creates and refuses to apply to or delete an
+existing namespace without that ownership label.
+
+The default image uses Kicks. Build it with Sneakers instead without editing the
+fixture:
+
+```bash
+AMQP_WORKER_GEM=sneakers spec/integration/verify.sh build
+```
 
 Three things that cost time if you meet them the hard way:
 

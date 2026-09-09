@@ -15,3 +15,8 @@ end
 # Pulled in by the worker gem anyway; named here so the fixture fails loudly at
 # bundle time rather than at subscribe time if that ever stops being true.
 gem 'bunny'
+
+# Sneakers 2.12 resolves serverengine 2.1, which requires base64 without
+# declaring it. Ruby 3.4 no longer makes that bundled gem implicitly available
+# inside an unrelated Bundler definition.
+gem 'base64'

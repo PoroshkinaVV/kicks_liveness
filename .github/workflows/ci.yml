@@ -8,72 +8,57 @@ on:
 jobs:
   spec:
     # The gem declares neither `kicks` nor `sneakers` as a dependency, so the
-    # suite has to pass against both: the Gemfile picks one by AMQP_WORKER_GEM.
-    # They also drag in different bunny majors (kicks 3.4 -> bunny 3.x, sneakers
-    # 2.11 -> bunny 2.x), so this matrix is what checks that the predicate finds
-    # the same in-memory API on either one.
-    name: spec (ruby ${{ matrix.ruby }}, ${{ matrix.worker_gem }})
+    # suite has to pass against both: Appraisal defines one Gemfile for each.
+    # They also drag in different Bunny dependency lines, so this matrix checks
+    # that the predicate finds the same in-memory API on either one.
+    name: spec (ruby ${{ matrix.ruby }}, ${{ matrix.appraisal }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         ruby: ['3.1', '3.2', '3.3', '3.4', '4.0', 'head']
-        worker_gem: [kicks, sneakers]
+        appraisal: [kicks_current, sneakers_current]
         exclude:
           - ruby: head
-            worker_gem: sneakers
+            appraisal: sneakers_current
     continue-on-error: ${{ matrix.ruby == 'head' }}
     env:
-      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
+      BUNDLE_GEMFILE: gemfiles/${{ matrix.appraisal }}.gemfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-          cache-version: ${{ matrix.worker_gem }}
+          cache-version: ${{ matrix.appraisal }}
 
       - run: bundle exec rspec
 
   floor:
-    # The `~>` constraints in the Gemfile resolve to the newest release, so the
-    # matrix above proves the newest works and says nothing about the oldest.
-    # This job pins the floor the gemspec and the docs promise. It has to be a
-    # separate job rather than an `include:` on the matrix: an include whose
-    # existing keys match a combination extends that job instead of adding one,
-    # so the plain ruby 3.1 runs would have been replaced rather than joined.
-    #
-    # kicks 3.0.0 resolves bunny 2.x while kicks 3.4 resolves 3.x, so this also
-    # covers the predicate against both bunny majors from the kicks side.
-    name: floor (${{ matrix.worker_gem }} ${{ matrix.worker_gem_version }})
+    name: floor (${{ matrix.appraisal }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - worker_gem: kicks
-            worker_gem_version: '3.0.0'
-          - worker_gem: sneakers
-            worker_gem_version: '2.11.0'
+        appraisal: [kicks_3_0, sneakers_2_11]
     env:
-      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
-      AMQP_WORKER_GEM_VERSION: ${{ matrix.worker_gem_version }}
+      BUNDLE_GEMFILE: gemfiles/${{ matrix.appraisal }}.gemfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.1'
           bundler-cache: true
-          cache-version: floor-${{ matrix.worker_gem }}
+          cache-version: ${{ matrix.appraisal }}
 
       - run: bundle exec rspec
 
   rubocop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -81,4 +66,36 @@ jobs:
           bundler-cache: true
           cache-version: kicks
 
+      - run: bundle exec appraisal generate
+
+      - name: Generated gemfiles match Appraisals
+        run: |
+          git diff --exit-code -- gemfiles
+          untracked="$(git ls-files --others --exclude-standard -- gemfiles)"
+          if [ -n "$untracked" ]; then
+            echo "$untracked"
+            echo "gemfiles/ has files Appraisals generated but git does not track; commit them"
+            exit 1
+          fi
+
       - run: bundle exec rubocop
+
+  yard:
+    # The gemspec's `documentation_uri` points at rubydoc.info, which rebuilds
+    # from `.yardopts` when the gem is pushed, so a broken page ships silently.
+    # Both ways that happens — a mistyped tag dropping a return value, a renamed
+    # file still listed in `.yardopts` dropping the whole page — are YARD
+    # warnings rather than errors, which is why the gate is --fail-on-warning.
+    # Coverage is deliberately not the check: `yard stats` counts whether a
+    # comment exists, not whether it renders, and reports 100% through both.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          cache-version: kicks
+
+      - run: bundle exec yard doc --fail-on-warning

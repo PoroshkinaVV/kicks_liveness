@@ -60,7 +60,7 @@ module KicksLiveness
             consumers: kicks_liveness_expected_consumers
           )
         rescue StandardError => e
-          KicksLiveness.config.resolved_logger&.error("[liveness] failed to start: #{e.class}: #{e.message}")
+          report_start_failure(e)
         end
       end
 
@@ -79,6 +79,17 @@ module KicksLiveness
       end
 
       private
+
+      def report_start_failure(error)
+        KicksLiveness.config.resolved_logger&.error(
+          "[liveness] failed to start: #{error.class}: #{error.message}"
+        )
+      rescue StandardError
+        # This is already the failure path. Neither resolving the configuration
+        # again nor a broken logger may let liveness instrumentation stop the
+        # worker process it is meant to observe.
+        nil
+      end
 
       # The same set the worker gem itself builds its workers from, so the
       # queue list is never duplicated and cannot drift. An array of classes

@@ -20,7 +20,7 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = '>= 3.1'
 
   # All of docs/ is public: the working documents live in plans/, which is gitignored.
-  spec.files = Dir['lib/**/*.rb', 'exe/*', 'docs/*.md', 'README.md', 'CHANGELOG.md', 'LICENSE.txt']
+  spec.files = Dir['lib/**/*.rb', 'exe/*', 'docs/*.md', '.yardopts', 'README.md', 'CHANGELOG.md', 'LICENSE.txt']
   spec.bindir = 'exe'
   spec.executables = ['kicks-liveness']
   spec.require_paths = ['lib']
