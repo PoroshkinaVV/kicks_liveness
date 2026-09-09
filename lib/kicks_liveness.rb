@@ -46,10 +46,13 @@ module KicksLiveness
     # <tt>gem 'kicks', require: false</tt> the to_prepare hook runs earlier and
     # would fail on NameError.
     #
-    # @raise [LoadError] if neither +kicks+ nor +sneakers+ is available
+    # @raise [LoadError] if neither worker gem is available, or if both +kicks+
+    #   and +sneakers+ are activated
     # @return [Module]
     # @see file:docs/SETUP.md#installing-the-hooks
     def install!
+      reject_ambiguous_worker_gems!
+
       begin
         require 'sneakers'
         require 'sneakers/workergroup'
@@ -79,6 +82,15 @@ module KicksLiveness
       return unless config.enabled?
 
       Monitor.new(slot: slot, processes: processes, consumers: consumers, config: config).start!
+    end
+
+    private
+
+    def reject_ambiguous_worker_gems!
+      return unless defined?(Gem.loaded_specs)
+      return unless Gem.loaded_specs.key?('kicks') && Gem.loaded_specs.key?('sneakers')
+
+      raise LoadError, 'kicks_liveness cannot run with both kicks and sneakers activated; install exactly one'
     end
   end
 end

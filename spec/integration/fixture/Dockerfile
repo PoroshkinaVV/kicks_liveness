@@ -7,9 +7,11 @@
 # machine.
 FROM ruby:3.4-slim
 
+ARG AMQP_WORKER_GEM=kicks
 ENV LANG=C.UTF-8 \
     BUNDLE_JOBS=4 \
-    KICKS_LIVENESS_DIR=/opt/app/tmp/health
+    KICKS_LIVENESS_DIR=/opt/app/tmp/health \
+    AMQP_WORKER_GEM=$AMQP_WORKER_GEM
 
 WORKDIR /opt/app
 
@@ -22,7 +24,7 @@ RUN apt-get update && \
 
 
 # Everything the gemspec's file list needs, and nothing else.
-COPY kicks_liveness.gemspec README.md CHANGELOG.md LICENSE.txt ./
+COPY kicks_liveness.gemspec .yardopts README.md CHANGELOG.md LICENSE.txt ./
 COPY lib ./lib
 COPY exe ./exe
 COPY docs ./docs

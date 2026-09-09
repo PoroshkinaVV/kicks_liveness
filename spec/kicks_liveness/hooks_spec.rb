@@ -138,6 +138,15 @@ RSpec.describe KicksLiveness::Hooks do
       expect { group.after_fork }.not_to raise_error
       expect(group.app_hook_ran).to be(true)
     end
+
+    it 'lets the fork carry on when reporting the failure raises too' do
+      broken_logger = instance_double(FakeLogger)
+      allow(broken_logger).to receive(:error).and_raise(RuntimeError, 'logger failed')
+      allow(KicksLiveness.config).to receive(:resolved_logger).and_return(broken_logger)
+
+      expect { group.after_fork }.not_to raise_error
+      expect(group.app_hook_ran).to be(true)
+    end
   end
 
   describe 'Hooks::WorkerGroup#stop' do

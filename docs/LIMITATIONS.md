@@ -80,20 +80,17 @@ see the respawn escalation below.
 
 ## Changing the worker count at runtime is not supported
 
-`ServerEngine` re-reads its configuration on SIGHUP, and a changed `workers`
-value scales the fork set. Scaling **up** is fine. Scaling **down** is only
-handled when the supervisor also restarts the forks, which is what the restart
-path does: the surviving monitors re-declare the current count on their next
-tick and the probe follows.
+`ServerEngine` can re-read its configuration on SIGHUP and scale the fork set,
+but a fork holds its own copy of that configuration from the moment it was
+created. Every monitor re-declares that captured count on every tick.
 
-What cannot be handled is a reload that lowers `workers` while leaving existing
-forks running. `reload_config` executes in the supervisor, and a fork holds its
-own copy of the configuration from the moment it was forked — so a fork cannot
-see the new number however often it looks. The declared count then stays too
-high, the marks for the retired slots go stale, and the probe fails until the
-pod restarts.
+After a scale-up, old forks keep declaring the old count while new forks declare
+the new one. The shared `expected` file therefore depends on which fork wrote
+last; it can temporarily require the new slots, or incorrectly report the old
+set as complete. After a scale-down, the surviving forks keep declaring the old
+count and the retired slots eventually go stale. Neither direction is safe.
 
-If you scale workers, restart them.
+If you change `workers`, restart the runner. Runtime scaling is not supported.
 
 ## A respawn loop is reported once per grace window, not once per respawn
 
@@ -126,7 +123,9 @@ executing the `sneakers` code while its lockfile says otherwise, and pulling in
 resolve.
 
 A loud failure gets fixed; a silent substitution does not. Keep exactly one of
-the two.
+the two. Bundler itself still accepts the combination, but `install!` now
+rejects a process in which both gems are activated before either set of hooks is
+installed.
 
 If neither is present, `install!` raises a `LoadError` naming both with their
 required versions.

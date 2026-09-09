@@ -5,24 +5,19 @@ on:
     tags: ['v*']
 
 jobs:
-  gate:
-    name: spec (${{ matrix.worker_gem }})
+  validate:
+    name: Validate tag
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        worker_gem: [kicks, sneakers]
-    env:
-      AMQP_WORKER_GEM: ${{ matrix.worker_gem }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
-          bundler-cache: true
-          cache-version: ${{ matrix.worker_gem }}
-      - name: Tag matches gem version
+
+      - name: Tag matches gem version and belongs to main
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version="$(ruby -Ilib -r kicks_liveness/version -e 'print KicksLiveness::VERSION')"
@@ -30,12 +25,66 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match KicksLiveness::VERSION ${version}"
             exit 1
           fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag ${GITHUB_REF_NAME} does not point to a commit on main"
+            exit 1
+          fi
 
-      - run: bundle exec rspec
+  gate:
+    name: gate (ruby ${{ matrix.ruby }}, ${{ matrix.appraisal }})
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ruby: '3.4'
+            appraisal: kicks_current
+          - ruby: '3.4'
+            appraisal: sneakers_current
+          - ruby: '3.1'
+            appraisal: kicks_3_0
+          - ruby: '3.1'
+            appraisal: sneakers_2_11
+    env:
+      BUNDLE_GEMFILE: gemfiles/${{ matrix.appraisal }}.gemfile
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          cache-version: release-${{ matrix.appraisal }}
+
+      - run: bundle exec rake
+
+  package:
+    name: Package smoke test
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+
+      - name: Build, install, and run the packaged executable
+        run: |
+          gem build kicks_liveness.gemspec
+          install_root="$RUNNER_TEMP/kicks-liveness-package"
+          GEM_HOME="$install_root/gems" GEM_PATH="$install_root/gems" gem install ./kicks_liveness-*.gem --install-dir "$install_root/gems" --bindir "$install_root/bin" --ignore-dependencies --no-document
+          marks_dir="$RUNNER_TEMP/kicks-liveness-marks"
+          mkdir -p "$marks_dir"
+          printf '1' > "$marks_dir/expected"
+          printf 'healthy' > "$marks_dir/worker-0"
+          output="$(KICKS_LIVENESS_DIR="$marks_dir" GEM_HOME="$install_root/gems" GEM_PATH="$install_root/gems" "$install_root/bin/kicks-liveness")"
+          test "$output" = '1 process(es) healthy'
 
   push:
     name: Push gem to RubyGems.org
-    needs: gate
+    needs: package
     runs-on: ubuntu-latest
 
     # Must match the trusted publisher's Environment field on RubyGems.org.
@@ -46,7 +95,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:

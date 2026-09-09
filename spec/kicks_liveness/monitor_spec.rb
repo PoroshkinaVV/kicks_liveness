@@ -97,6 +97,16 @@ RSpec.describe KicksLiveness::Monitor do
 
       expect(logger.lines.count { |level, _| level == :error }).to eq(1)
     end
+
+    it 'keeps publishing when the logger raises' do
+      broken_logger = instance_double(FakeLogger)
+      allow(broken_logger).to receive(:info).and_raise(RuntimeError, 'logger failed')
+      config.logger = broken_logger
+      healthy!
+
+      expect(monitor.tick!).to be(true)
+      expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
+    end
   end
 
   # A graceful shutdown empties the registry as each worker unsubscribes, and
@@ -162,6 +172,21 @@ RSpec.describe KicksLiveness::Monitor do
 
       expect(thread).to be_alive
       expect(logger.lines).to include([:error, '[liveness] slot 0: monitor loop failed: RuntimeError: boom'])
+    ensure
+      thread&.kill
+    end
+
+    it 'survives when reporting a loop error raises too' do
+      broken_logger = instance_double(FakeLogger)
+      allow(broken_logger).to receive(:info).and_raise(RuntimeError, 'logger failed')
+      allow(broken_logger).to receive(:error).and_raise(RuntimeError, 'logger failed')
+      config.logger = broken_logger
+      allow(KicksLiveness::Registry).to receive(:healthy?).and_raise(RuntimeError, 'tick failed')
+
+      thread = monitor.start!
+      sleep 0.2
+
+      expect(thread).to be_alive
     ensure
       thread&.kill
     end

@@ -249,7 +249,7 @@ check.
 
 ## What is configurable, and where
 
-| | Where | Why |
+| Setting | Where | Why |
 |---|---|---|
 | `logger`, `enabled`, `startup_grace_ticks` | application config block | only the worker needs them |
 | `tick` | either, and the config block wins | only the worker reads it, so two sources cannot contradict each other |
@@ -281,12 +281,26 @@ makes every mark stale on arrival, so the probe can never pass again. They fall
 back to the default too.
 
 Setting `tick` from the application is held to a stricter standard: a
-non-positive value raises `ArgumentError`. The environment gets a silent fallback
-because a ConfigMap typo must not bring a worker down, whereas an initializer is
-code, and code should fail loudly at boot, where the developer is looking.
+non-positive value raises `ArgumentError`, as does a value greater than or equal
+to `max_age`: such a monitor would inevitably let a healthy mark go stale. The
+environment gets a silent fallback for values that cannot be parsed. If its
+effective tick is greater than or equal to `max_age`, configuration emits a
+warning on stderr and uses the default tick when it is safe, or half of `max_age`
+otherwise. A ConfigMap typo must not bring a worker down, whereas an initializer
+is code and should fail loudly at boot, where the developer is looking.
+
+`startup_grace_ticks` must be a positive integer. It is compared directly with
+an integer counter; accepting zero, a float, or a string would silently disable
+the escalation that is supposed to diagnose a worker that never subscribes.
 
 The logger defaults to `Sneakers.logger` but is resolved lazily, because at the
 time the configuration object is built it may not be set up yet.
+
+Logging is diagnostic; the heartbeat is the liveness contract. An exception
+raised by a custom logger is therefore swallowed at the logging boundary. It
+cannot prevent a healthy tick from writing its mark, abort monitor startup, or
+escape the loop's error handler and kill the monitor thread. No fallback message
+is attempted through the same broken logger.
 
 ## Logging: events, not the pulse
 

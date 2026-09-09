@@ -286,15 +286,18 @@ redelivered.
 
 ## Environment variables
 
-| Variable | Default | |
-|---|---|---|
-| `KICKS_LIVENESS_DIR` | `/opt/app/tmp/health` | marks directory, **must be on tmpfs** |
-| `KICKS_LIVENESS_MAX_AGE` | `45` | seconds after which a mark is stale |
-| `KICKS_LIVENESS_TICK` | `10` | interval between ticks |
+| Variable | Default | Purpose | Invalid or blank value |
+|---|---|---|---|
+| `KICKS_LIVENESS_DIR` | `/opt/app/tmp/health` | marks directory, **must be on tmpfs** | uses the default |
+| `KICKS_LIVENESS_MAX_AGE` | `45` | seconds after which a mark is stale | uses the default |
+| `KICKS_LIVENESS_TICK` | `10` | interval between ticks | uses the default, then the safety fallback below if needed |
 
 Keep `tick` well below `max_age`. A tick longer than half of `max_age` leaves no
 room for a single missed write, and a tick longer than `max_age` guarantees a
-restart loop.
+restart loop. If environment values produce `tick >= max_age`, the worker writes
+a WARN to stderr and uses the default tick when that is safe, or half of
+`max_age` otherwise. An initializer value with the same mismatch raises
+`ArgumentError`. The half-threshold remains the recommended operational margin.
 
 `KICKS_LIVENESS_DIR` is also what separates two runners that share a pod. An
 application running both `rake sneakers:run` and `rake sneakers:active_job` has
@@ -315,9 +318,8 @@ probe command pointed at its own directory — the probe reads
 `KICKS_LIVENESS_DIR` from its own environment, which the kubelet takes from the
 container it runs in.
 
-Garbage in a value does not crash the worker — it falls back to the default. An
-empty string counts as unset, which is what a ConfigMap gives you when a key is
-declared and left blank.
+An empty string counts as unset, which is what a ConfigMap gives you when a key
+is declared and left blank.
 
 ## Verifying on a live pod
 
