@@ -9,12 +9,8 @@ Gem::Specification.new do |spec|
   spec.summary = 'Liveness probe for Kicks and Sneakers workers. No Rails, no broker call.'
   spec.description = <<~TEXT
     A liveness probe for RabbitMQ worker pods that loads no Rails and never talks
-    to the broker. The worker publishes a heartbeat to tmpfs from inside its own
-    process, checking its Bunny consumers in memory; the probe only reads the
-    file's mtime and runs as `bundle exec kicks-liveness`. It loads no application
-    code; aside from Bundler and the interpreter it loads only the gem's small
-    probe files, while the state itself comes from tmpfs. A broker hiccup cannot
-    restart every replica at once.
+    to the broker. Workers check their Bunny consumers in memory and publish a
+    heartbeat to tmpfs; the probe only reads that heartbeat.
   TEXT
   spec.homepage = 'https://github.com/PoroshkinaVV/kicks_liveness'
   spec.required_ruby_version = '>= 3.1'

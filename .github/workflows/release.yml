@@ -76,9 +76,7 @@ jobs:
           install_root="$RUNNER_TEMP/kicks-liveness-package"
           GEM_HOME="$install_root/gems" GEM_PATH="$install_root/gems" gem install ./kicks_liveness-*.gem --install-dir "$install_root/gems" --bindir "$install_root/bin" --ignore-dependencies --no-document
           marks_dir="$RUNNER_TEMP/kicks-liveness-marks"
-          mkdir -p "$marks_dir"
-          printf '1' > "$marks_dir/expected"
-          printf 'healthy' > "$marks_dir/worker-0"
+          KICKS_LIVENESS_DIR="$marks_dir" GEM_HOME="$install_root/gems" GEM_PATH="$install_root/gems" ruby -r kicks_liveness/heartbeat -e 'heartbeat = KicksLiveness::Heartbeat.new; heartbeat.declare!(1); heartbeat.touch!(0)'
           output="$(KICKS_LIVENESS_DIR="$marks_dir" GEM_HOME="$install_root/gems" GEM_PATH="$install_root/gems" "$install_root/bin/kicks-liveness")"
           test "$output" = '1 process(es) healthy'
 

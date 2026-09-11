@@ -1,5 +1,57 @@
 module KicksLiveness
-  # The liveness mark on the filesystem: written by the worker, read by the
+  # Identifies an ordinary Linux container incarnation shared by the worker and
+  # exec probes without writing anything to the marks directory. This assumes
+  # the container owns PID 1; shared and host PID namespaces are documented as
+  # unsupported in +docs/LIMITATIONS.md+.
+  # @api private
+  module ContainerGeneration
+    module_function
+
+    # @return [String, nil] current private-PID Linux container incarnation, or
+    #   nil when procfs does not expose one
+    # @api private
+    def current
+      mount_namespace = File.readlink('/proc/self/ns/mnt')
+      stat = File.read('/proc/1/stat')
+      closing_parenthesis = stat.rindex(') ')
+      return unless closing_parenthesis
+
+      # After the command in parentheses, field 3 (`state`) is index 0. Process
+      # start time is field 22, therefore index 19 in this tail.
+      started_at = stat[(closing_parenthesis + 2)..].split[19]
+      return unless started_at && Integer(started_at).positive?
+
+      "#{mount_namespace}:#{started_at}"
+    rescue StandardError
+      nil
+    end
+  end
+
+  # Generation-specific parts of the filesystem contract.
+  # @api private
+  module GenerationGuard
+    private
+
+    def generation_path
+      File.join(@dir, 'generation')
+    end
+
+    def declared_generation
+      File.read(generation_path)
+    rescue StandardError
+      nil
+    end
+
+    def current_generation?
+      !@generation || declared_generation == @generation
+    end
+
+    def previous_generation?(path)
+      @generation && File.read(path)[/\bgeneration=(\S+)/, 1] != @generation
+    end
+  end
+
+  # The liveness marks on the filesystem: written by the worker, read by the
   # probe.
   #
   # The directory must live on tmpfs — in Kubernetes, an emptyDir with
@@ -17,6 +69,8 @@ module KicksLiveness
   #
   # @see file:docs/DESIGN.md#why-the-heartbeat-file-has-no-require-of-its-own
   class Heartbeat
+    include GenerationGuard
+
     # @return [String] marks directory used when the environment says nothing
     DEFAULT_DIR = '/opt/app/tmp/health'.freeze
     # @return [Integer] seconds after which a mark is stale, by default
@@ -28,6 +82,16 @@ module KicksLiveness
       max_age: 'KICKS_LIVENESS_MAX_AGE',
       tick: 'KICKS_LIVENESS_TICK'
     }.freeze
+
+    # Linux exposes a stable identifier shared by a private-PID container and
+    # its exec probes. A restarted container gets a new identifier even though
+    # its Kubernetes emptyDir survives.
+    # @return [String, nil] current private-PID container incarnation, or nil
+    #   off Linux
+    # @api private
+    def self.container_generation
+      ContainerGeneration.current
+    end
 
     # An empty string counts as unset: in a ConfigMap that is what you get by
     # declaring a key and leaving it blank.
@@ -72,9 +136,15 @@ module KicksLiveness
 
     # @param dir [String] marks directory
     # @param max_age [Integer] seconds after which a mark is considered stale
-    def initialize(dir: Heartbeat.env_dir, max_age: Heartbeat.env_max_age)
+    # @param generation [String, nil] container incarnation; injected in specs
+    def initialize(
+      dir: Heartbeat.env_dir,
+      max_age: Heartbeat.env_max_age,
+      generation: Heartbeat.container_generation
+    )
       @dir = dir
       @max_age = max_age
+      @generation = generation
     end
 
     attr_reader :dir, :max_age
@@ -93,10 +163,8 @@ module KicksLiveness
     # @return [void]
     def declare!(processes)
       make_dir
-      # The pid keeps concurrent forks from sharing the temporary file.
-      tmp = "#{expected_path}.#{Process.pid}"
-      File.write(tmp, processes)
-      File.rename(tmp, expected_path)
+      atomic_write(generation_path, @generation) if @generation
+      atomic_write(expected_path, processes)
     end
 
     # Refreshes this fork's mark.
@@ -106,14 +174,18 @@ module KicksLiveness
     # PID in the name that file would stay stale forever and the probe would fail
     # permanently.
     #
-    # The contents exist only for a human running <tt>kubectl exec ... cat</tt>;
-    # the probe decides on mtime alone.
+    # The timestamp, pid and slot exist for a human running
+    # <tt>kubectl exec ... cat</tt>. The generation is also checked by the probe:
+    # a Kubernetes emptyDir survives a container restart, so freshness alone
+    # cannot distinguish this process from the one that just exited.
     #
     # @param slot [Integer] supervisor slot of this fork
     # @return [Integer] bytes written
     def touch!(slot)
       make_dir
-      File.write(slot_path(slot), "#{Time.now.utc.strftime('%FT%TZ')} pid=#{Process.pid} slot=#{slot}\n")
+      contents = "#{Time.now.utc.strftime('%FT%TZ')} pid=#{Process.pid} slot=#{slot}"
+      contents = "#{contents} generation=#{@generation}" if @generation
+      atomic_write(slot_path(slot), "#{contents}\n")
     end
 
     # The probe side: is every declared fork's mark present and fresh?
@@ -126,13 +198,9 @@ module KicksLiveness
     def check(now: Time.now.utc)
       processes = expected
       return [false, "no #{expected_path}: worker has not started yet"] unless processes&.positive?
+      return [false, 'heartbeat belongs to a previous container: worker has not started yet'] unless current_generation?
 
-      problems = (0...processes).filter_map do |slot|
-        age = age_of(slot_path(slot), now)
-        next "worker-#{slot} missing" if age.nil?
-
-        "worker-#{slot} stale #{age.round}s > #{@max_age}s" if age > @max_age
-      end
+      problems = (0...processes).filter_map { |slot| problem_for(slot, now) }
 
       problems.empty? ? [true, "#{processes} process(es) healthy"] : [false, problems.join('; ')]
     end
@@ -167,6 +235,25 @@ module KicksLiveness
       Integer(File.read(expected_path))
     rescue StandardError
       nil
+    end
+
+    def problem_for(slot, now)
+      path = slot_path(slot)
+      age = age_of(path, now)
+      return "worker-#{slot} missing" if age.nil?
+      return "worker-#{slot} belongs to a previous container" if previous_generation?(path)
+
+      "worker-#{slot} stale #{age.round}s > #{@max_age}s" if age > @max_age
+    rescue StandardError
+      "worker-#{slot} unreadable"
+    end
+
+    def atomic_write(path, contents)
+      # The pid keeps concurrent forks from sharing the temporary file.
+      tmp = "#{path}.#{Process.pid}"
+      bytes = File.write(tmp, contents)
+      File.rename(tmp, path)
+      bytes
     end
 
     def age_of(path, now)
