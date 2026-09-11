@@ -46,6 +46,21 @@ Without `medium: Memory` an `emptyDir` is backed by the node's disk, and the
 probe starts depending on the disk again — which is one of the things it exists
 to avoid.
 
+An `emptyDir` deliberately survives a restart of the container inside its pod.
+That keeps a Bootsnap or other application cache under `/opt/app/tmp` warm for
+the next attempt, but it also leaves the previous process's heartbeat files in
+`health/`. The gem does not clear the volume or that directory. Instead it
+records the current Linux container generation separately and in every slot
+mark. A fresh mark from the previous container is rejected until every fork in
+the current one has subscribed and published its own mark, so preserving the
+cache cannot make `startupProbe` succeed early.
+
+That guarantee assumes the default container-private PID namespace. Do not set
+`shareProcessNamespace: true` or `hostPID: true` on a pod that relies on it: in
+either topology PID 1 survives a worker-container restart, and the generation
+guard can accept an inherited fresh mark. See
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
+
 ## Why the command looks like that
 
 **`bundle exec kicks-liveness` is the standard command.** It works regardless
@@ -103,6 +118,12 @@ difference is only in how the file is found. Run through `bundle exec`, the
 executable is found regardless of `BUNDLE_PATH`, which is why it is the standard
 command. Run bare, it depends on the gem's `bin` directory being on `PATH`,
 which is not something to rely on in a manifest.
+
+Keep the worker and probe on the same gem version. Since 0.1.2 the heartbeat
+protocol includes a container generation; a newer probe correctly rejects the
+generation-less files written by an older worker. `bundle exec` guarantees that
+both sides resolve from the same bundle. If the faster form below installs a
+second copy in `GEM_HOME`, rebuild that copy on every gem upgrade too.
 
 ### Where your image puts its gems
 

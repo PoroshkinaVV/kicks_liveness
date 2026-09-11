@@ -92,6 +92,37 @@ count and the retired slots eventually go stale. Neither direction is safe.
 
 If you change `workers`, restart the runner. Runtime scaling is not supported.
 
+## Container generations require Linux procfs and container-owned PID 1
+
+Kubernetes keeps an `emptyDir` across restarts of a container in the same pod.
+To prevent the next container from inheriting a fresh heartbeat, the worker and
+exec probe independently identify their shared incarnation from Linux procfs:
+the mount namespace plus PID 1 start time. No application cache is removed.
+
+The identifier also assumes that the container owns PID 1. With
+`shareProcessNamespace: true`, PID 1 is the pod sandbox, and with
+`hostPID: true` it is the node's init process; neither restarts when the worker
+container does, so the start-time half of the identifier stays constant. The
+mount namespace inode is then the only remaining signal, and the kernel
+normally hands the just-released inode back to the replacement container in an
+otherwise quiet pod. Under either setting the guard silently degrades to the
+0.1.1 freshness-only behavior and can accept a fresh mark from the previous
+container. Do not enable either setting on a pod whose `startupProbe` relies on
+this guarantee.
+
+If procfs is unavailable — for example, when using the gem outside a Linux
+container — generation detection falls back to the original freshness-only
+check. The worker and probe still function, but they cannot distinguish a fresh
+mark left by a previous process from one written by the current process. Linux
+Kubernetes, Docker, and Nomad containers expose the required procfs entries
+under their normal configuration.
+
+The worker and its exec probe must run in the **same container**. A neighbouring
+sidecar can mount the same `emptyDir`, but it has a different mount namespace
+and therefore treats the worker's marks as belonging to another container.
+Kubernetes exec probes already run inside the container they check; do not move
+`kicks-liveness` into a separate health sidecar.
+
 ## A respawn loop is reported once per grace window, not once per respawn
 
 When a fork cannot subscribe at all, the supervisor brings it back after
@@ -111,6 +142,15 @@ reports the elapsed time and the number of starts:
 
 The number of starts is the diagnosis: it separates a slow start from a respawn
 loop at a glance.
+
+This unhealthy-run counter is scoped to the marks volume, not to the container
+generation. If a container is restarted before its slot has ever become
+healthy, the replacement continues the same count: its repeated `started:` line
+is suppressed, and an expired grace window may immediately report an ERROR that
+includes starts from the previous container. This is diagnostic state only; it
+does not participate in the probe result, and the first healthy tick removes
+it. Treat the count as "starts since this slot was last healthy in this pod",
+not "starts in this container".
 
 ## Do not install both `kicks` and `sneakers`
 

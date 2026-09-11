@@ -174,11 +174,13 @@ Once workers are running, the marks directory is the other half of the answer:
 ```
 $ ls -l /opt/app/tmp/health/
 expected
+generation
 worker-0
 worker-1
 ```
 
-One `worker-<slot>` file per fork, plus `expected`. If `expected` is there and
-the slot files are not, the workers have not finished subscribing. A slot that
-keeps restarting without ever subscribing also leaves an `attempt-<slot>` file,
-which is removed as soon as that slot becomes healthy.
+One `worker-<slot>` file per fork, plus `expected` and the current container
+`generation`. If `expected` is there and the slot files are not, the workers
+have not finished subscribing. A slot that keeps restarting without ever
+subscribing also leaves an `attempt-<slot>` file, which is removed as soon as
+that slot becomes healthy.

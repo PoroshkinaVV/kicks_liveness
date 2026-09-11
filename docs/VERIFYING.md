@@ -97,11 +97,15 @@ spec/integration/verify.sh probe
 INFO: [liveness] slot 0: started: dir=/opt/app/tmp/health max_age=45s tick=10s processes=1 consumers=2
 INFO: [liveness] slot 0: waiting for 2 consumers
 INFO: [liveness] slot 0: healthy          # one tick later
-expected  worker-0                        # in the marks directory
+expected  generation  worker-0            # in the marks directory
 1 process(es) healthy                     # probe, exit 0
 ```
 
-The hooks fired inside a real ServerEngine fork, which no double can show.
+The hooks fired inside a real ServerEngine fork, which no double can show. On a
+fresh fixture the first attempt also prints `started:`. Do not use that line as
+the sole proof after a same-pod container restart: an inherited unhealthy-run
+counter deliberately suppresses repeated start lines, as described in
+[LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).
 
 ### 2. A stale mark
 
@@ -242,9 +246,9 @@ find them.
 ```
 INFO: [liveness] slot 0: started: ... processes=2 consumers=2
 INFO: [liveness] slot 1: started: ... processes=2 consumers=2
-expected  worker-0  worker-1      # expected contains "2"
-2 process(es) healthy             # exit 0
-worker-1 stale 120s > 45s         # exit 1 — staling either mark is enough
+expected  generation  worker-0  worker-1  # expected contains "2"
+2 process(es) healthy                     # exit 0
+worker-1 stale 120s > 45s                 # exit 1 — staling either mark is enough
 ```
 
 Both marks are required, not just the first.
@@ -330,6 +334,38 @@ on the very failure scenario 3 demonstrates, where the queue goes away and the
 pod is restarted. That is why the documented rule set pairs it with
 `absent_over_time`, and why an `up == 0` on the scrape job is worth having
 beside both.
+
+### 11. A private-PID container restart cannot inherit a healthy mark
+
+This scenario needs the fixture image but not Kubernetes or RabbitMQ. It starts
+a container that publishes a healthy mark into a named volume, restarts that
+same container, and delays the new writer for 15 seconds:
+
+```bash
+spec/integration/verify.sh build
+spec/integration/verify.sh generation-restart
+```
+
+During the delay the inherited mark is still fresh, but the probe must reject
+its old generation. Once the replacement writer publishes its own mark, the
+same probe must become healthy again. The command checks both transitions and
+prints output in this form:
+
+```
+before=mnt:[4026532686]:123456
+after=mnt:[4026532686]:123789
+inherited=heartbeat belongs to a previous container: worker has not started yet
+recovered=1 process(es) healthy
+```
+
+The namespace inode is allowed to be reused, as in the example above; the PID 1
+start time still distinguishes the two incarnations. The test removes its
+container and named volume on exit.
+
+This scenario covers the default container-private PID namespace. With
+`shareProcessNamespace: true` or `hostPID: true`, PID 1 survives the worker
+container restart and this guarantee does not hold; see
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
 
 ## What to do with a disagreement
 

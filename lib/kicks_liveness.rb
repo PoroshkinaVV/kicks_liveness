@@ -9,8 +9,8 @@ require_relative 'kicks_liveness/hooks'
 # Liveness probe for Kicks and Sneakers workers, backed by a tmpfs heartbeat.
 #
 # The worker publishes a mark from inside its own process, checking its Bunny
-# consumers in memory; the probe reads only the mark's mtime. No Rails, no call
-# to the broker.
+# consumers in memory; the probe reads only the container generation and mark
+# mtimes. No Rails, no call to the broker.
 #
 # @see file:docs/SETUP.md
 # @see file:docs/DESIGN.md

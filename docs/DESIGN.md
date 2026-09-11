@@ -40,16 +40,17 @@ outside it can, so let the worker publish and let the probe read.
 
 Every `tick` seconds (10 by default) the worker checks, **in its own memory**,
 that its consumers are still subscribed, and touches a file on tmpfs. The probe
-loads one dependency-free Ruby file, reads the file's mtime, and exits with 0 or
-1.
+loads one dependency-free Ruby file, checks the marks' container generation and
+mtimes, and exits with 0 or 1.
 
 The probe therefore performs no network I/O and boots no framework, and the
-state it reads — the mark's mtime — comes from tmpfs, which is RAM. Be precise
-about the disk, though: starting the probe still loads the Ruby interpreter and
-two files of this gem from the image filesystem, and those reads are ordinary
-filesystem reads (usually served from page cache, but not guaranteed to be). The
-honest claim is not "no disk" but *no application boot, and no disk on the path
-that decides the answer* — which is what removes the defects above, not tuning.
+state it reads — the generation and mark mtimes — comes from procfs and tmpfs.
+Be precise about the disk, though: starting the probe still loads the Ruby
+interpreter and two files of this gem from the image filesystem, and those reads
+are ordinary filesystem reads (usually served from page cache, but not
+guaranteed to be). The honest claim is not "no disk" but *no application boot,
+and no disk on the path that decides the answer* — which is what removes the
+defects above, not tuning.
 
 ## The health predicate
 
@@ -112,6 +113,7 @@ silently. That is the thing to re-check when upgrading Bunny.
 
 ```
 <dir>/expected       how many forks the probe must wait for
+<dir>/generation     which container incarnation wrote this heartbeat
 <dir>/worker-<slot>  one per fork, refreshed every tick the fork is healthy
 <dir>/attempt-<slot> starts of a slot that has not become healthy yet
 ```
@@ -126,6 +128,24 @@ it: if the directory is wiped, `touch!` brings the slot marks back while
 `expected` stays missing, and the probe reports "worker has not started" for the
 rest of the pod's life. Rewriting it is also what lets a respawned set of forks
 correct a count that has been lowered.
+
+**`generation` closes a container-restart hole when the container owns PID 1.**
+Kubernetes preserves an `emptyDir` when it restarts a container inside the same
+pod. That is useful for an application cache elsewhere in the volume, but a
+fresh heartbeat from the dead process must not let the new container pass its
+one-shot `startupProbe`. On Linux, the worker and exec probe independently
+derive the same incarnation from the container's mount namespace and PID 1
+start time. Both `generation` and every slot mark carry it. Until the new
+container declares itself and every current fork publishes its own mark, files
+inherited from the previous container are rejected. Nothing outside the marks
+directory is removed.
+
+This guarantee assumes Kubernetes' default container-private PID namespace.
+With `shareProcessNamespace: true` PID 1 belongs to the pod sandbox, and with
+`hostPID: true` it is the node init process; neither restarts with the worker
+container. Under either setting the guard can accept an inherited fresh mark.
+Do not enable them on a pod whose startup probe relies on this guarantee; see
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
 
 **Files are named by supervisor slot, not by PID.** A fork killed with SIGKILL
 is respawned into the same slot and overwrites its own file. Had the name
@@ -143,12 +163,13 @@ probe sees either the old value or the new one.
 the single reason that the directory outlives the fork: a monitor caught in a
 respawn loop is a brand-new object every few hundred milliseconds and can hold
 no counter of its own. The file is removed once the slot becomes healthy, so in
-steady state the directory holds only `expected` and the `worker-<slot>` marks;
-what the counter is for is in
+steady state the directory holds `expected`, `generation`, and the
+`worker-<slot>` marks. What the counter is for is in
 [LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).
 
-The *contents* of `worker-<slot>` (timestamp, pid, slot) exist only for a human
-running `kubectl exec ... cat`. The probe decides on mtime alone.
+The timestamp, pid, and slot in `worker-<slot>` exist for a human running
+`kubectl exec ... cat`. Its generation is part of the probe contract; freshness
+still comes from mtime.
 
 The directory must be on tmpfs — in Kubernetes, an `emptyDir` with
 `medium: Memory`. Put it on a real disk and the probe starts depending on the

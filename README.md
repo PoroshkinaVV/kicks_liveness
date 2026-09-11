@@ -10,8 +10,14 @@
 Rails or querying RabbitMQ from the probe.**
 
 The worker checks its own Bunny consumers and publishes a heartbeat to tmpfs.
-The probe only reads that heartbeat. No application boot, no network call, and
-no healthy replica hiding a stalled one.
+The probe only reads that heartbeat, scoped to the current container
+incarnation. No application boot, no network call, and no healthy replica
+hiding a stalled one.
+
+That restart scoping assumes Kubernetes' default container-private PID
+namespace; see
+[Limitations](docs/LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1)
+for pods that set `shareProcessNamespace` or `hostPID`.
 
 ## Install: one line in Rails
 
@@ -189,7 +195,7 @@ negative path before rollout; the commands and expected output are in
 | [Design](docs/DESIGN.md) | health predicate, heartbeat files, hooks, configuration choices, and measurements |
 | [Running under Kubernetes](docs/KUBERNETES.md) | full manifest, CPU/startup budgets, alerts, and live-pod verification |
 | [Limitations](docs/LIMITATIONS.md) | cases the in-memory predicate intentionally cannot cover |
-| [Verification scenarios](docs/VERIFYING.md) | ten deliberately induced failures and their observed outcomes |
+| [Verification scenarios](docs/VERIFYING.md) | eleven deliberately induced failures and their observed outcomes |
 
 ## Contributing
 

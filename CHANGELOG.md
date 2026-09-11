@@ -5,6 +5,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-11
+
+### Fixed
+
+- Reject heartbeat files inherited from a previous container incarnation. A
+  Kubernetes `emptyDir` survives container restarts, so a fresh mark left by a
+  formerly healthy worker could make the next container pass `startupProbe`
+  before its consumers had subscribed. Cache files elsewhere in the same
+  `emptyDir` remain untouched and available to warm the next application boot.
+  This protection assumes the default container-private PID namespace; pods
+  using `shareProcessNamespace` or `hostPID` retain the 0.1.1 freshness-only
+  behavior (see `docs/LIMITATIONS.md`).
+  The marks directory now contains `<dir>/generation`, and each
+  `worker-<slot>` mark carries the same value; tooling that enumerates the
+  directory should allow for this new metadata file.
+
 ## [0.1.1] - 2026-09-09
 
 ### Added
@@ -57,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [docs/](https://github.com/PoroshkinaVV/kicks_liveness/tree/main/docs); start
   with `SETUP.md`, and read `LIMITATIONS.md` before relying on it.
 
-[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/PoroshkinaVV/kicks_liveness/releases/tag/v0.1.0

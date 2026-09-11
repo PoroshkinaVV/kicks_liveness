@@ -116,6 +116,94 @@ cmd_probe() {
     'ruby -e "require %q(kicks_liveness/probe)"; echo "exit=$?"'
 }
 
+cleanup_generation_restart() {
+  if [[ -n "${GENERATION_CONTAINER:-}" ]]; then
+    docker --context "$DOCKER_CONTEXT_NAME" rm --force "$GENERATION_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${GENERATION_VOLUME:-}" ]]; then
+    docker --context "$DOCKER_CONTEXT_NAME" volume rm "$GENERATION_VOLUME" >/dev/null 2>&1 || true
+  fi
+}
+
+generation_probe() {
+  docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
+    ruby -e 'require %q(kicks_liveness/probe)'
+}
+
+wait_for_generation_probe() {
+  local output
+  for _ in {1..30}; do
+    if output="$(generation_probe 2>&1)"; then
+      printf '%s\n' "$output"
+      return
+    fi
+    sleep 1
+  done
+
+  printf '%s\n' "$output" >&2
+  return 1
+}
+
+cmd_generation_restart() {
+  if ! docker --context "$DOCKER_CONTEXT_NAME" image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "no image '$IMAGE' in Docker context '$DOCKER_CONTEXT_NAME': run '$0 build' first" >&2
+    return 1
+  fi
+
+  GENERATION_CONTAINER="kicks-liveness-generation-$$"
+  GENERATION_VOLUME="${GENERATION_CONTAINER}-state"
+  trap cleanup_generation_restart EXIT
+
+  docker --context "$DOCKER_CONTEXT_NAME" volume create "$GENERATION_VOLUME" >/dev/null
+  docker --context "$DOCKER_CONTEXT_NAME" run --detach \
+    --name "$GENERATION_CONTAINER" \
+    --mount "source=$GENERATION_VOLUME,target=/opt/app/tmp" \
+    "$IMAGE" sh -c '
+      if [ -e /opt/app/tmp/generation-restart-seen ]; then
+        sleep 15
+      else
+        touch /opt/app/tmp/generation-restart-seen
+      fi
+      ruby -r kicks_liveness/heartbeat -e \
+        "heartbeat = KicksLiveness::Heartbeat.new; heartbeat.declare!(1); heartbeat.touch!(0)"
+      exec sleep infinity
+    ' >/dev/null
+
+  wait_for_generation_probe >/dev/null
+  local before_generation
+  before_generation="$(docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
+    cat /opt/app/tmp/health/generation)"
+
+  docker --context "$DOCKER_CONTEXT_NAME" restart --time 1 "$GENERATION_CONTAINER" >/dev/null
+
+  local after_generation
+  after_generation="$(docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
+    ruby -r kicks_liveness/heartbeat -e 'print KicksLiveness::Heartbeat.container_generation')"
+  if [[ "$before_generation" == "$after_generation" ]]; then
+    echo "container generation did not change: $before_generation" >&2
+    return 1
+  fi
+
+  local inherited_output inherited_exit=0
+  if inherited_output="$(generation_probe 2>&1)"; then
+    inherited_exit=0
+  else
+    inherited_exit=$?
+  fi
+  if [[ "$inherited_exit" -ne 1 ]] || \
+     [[ "$inherited_output" != 'heartbeat belongs to a previous container: worker has not started yet' ]]; then
+    echo "inherited heartbeat unexpectedly returned exit=$inherited_exit: $inherited_output" >&2
+    return 1
+  fi
+
+  local recovered_output
+  recovered_output="$(wait_for_generation_probe)"
+  printf 'before=%s\n' "$before_generation"
+  printf 'after=%s\n' "$after_generation"
+  printf 'inherited=%s\n' "$inherited_output"
+  printf 'recovered=%s\n' "$recovered_output"
+}
+
 cmd_marks() { guard; kube exec deploy/worker -- ls -l /opt/app/tmp/health/; }
 cmd_logs()  { guard; kube logs deploy/worker --tail="${1:-50}"; }
 cmd_ui()    { guard; kube port-forward deploy/rabbitmq 15672:15672; }
@@ -125,12 +213,13 @@ case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
   probe) cmd_probe ;;
+  generation-restart) cmd_generation_restart ;;
   marks) cmd_marks ;;
   logs) shift; cmd_logs "${1:-50}" ;;
   ui) cmd_ui ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 {build|up|down|probe|marks|logs [n]|ui|status}" >&2
+    echo "usage: $0 {build|up|down|probe|generation-restart|marks|logs [n]|ui|status}" >&2
     exit 64
     ;;
 esac
