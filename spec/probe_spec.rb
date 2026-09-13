@@ -16,6 +16,16 @@ RSpec.describe 'liveness probe' do
     [out.strip, status.exitstatus]
   end
 
+  # The marks below are published through this host's own topology, because the
+  # subprocess derives its generation the same way and the two have to agree. A
+  # host that proves its own topology unsupported — a privileged container in
+  # the host PID namespace, which some CI runners are — would publish the
+  # fail-closed state instead of marks, and every example here would report that
+  # verdict rather than the one it is about.
+  before do
+    skip 'this host is itself in a shared or host PID namespace' if KicksLiveness::Heartbeat.topology.unsafe?
+  end
+
   def healthy_marks!
     KicksLiveness::Heartbeat.new(dir: dir, max_age: 45).tap do |heartbeat|
       heartbeat.declare!(1)

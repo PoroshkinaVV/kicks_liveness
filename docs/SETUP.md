@@ -192,6 +192,6 @@ can show a stale incarnation. It is not deleted in that state on purpose —
 removing it could fail a concurrently running probe that does have a valid
 generation, for a reason that has nothing to do with the worker's health. Two
 further files appear only when something is wrong: `topology-unsafe`, which
-fails every probe until the pod is recreated, and `topology-warning`, which is
-how the worker keeps its degradation warning to one line. Both are explained in
+fails every probe until the pod is recreated, and `topology-report`, which is
+how the worker keeps what it says about the topology to one line. Both are explained in
 [LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).

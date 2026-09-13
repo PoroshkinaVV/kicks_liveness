@@ -1,7 +1,7 @@
 require_relative 'kicks_liveness/version'
 require_relative 'kicks_liveness/heartbeat'
 require_relative 'kicks_liveness/attempts'
-require_relative 'kicks_liveness/topology_warning'
+require_relative 'kicks_liveness/topology_report'
 require_relative 'kicks_liveness/configuration'
 require_relative 'kicks_liveness/registry'
 require_relative 'kicks_liveness/monitor'

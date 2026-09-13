@@ -117,7 +117,7 @@ silently. That is the thing to re-check when upgrading Bunny.
 <dir>/worker-<slot>    one per fork, refreshed every tick the fork is healthy
 <dir>/attempt-<slot>   starts of a slot that has not become healthy yet
 <dir>/topology-unsafe  the PID namespace is not this container's: fail closed
-<dir>/topology-warning what the worker has already warned about, once
+<dir>/topology-report  what the worker has already reported about it, once
 ```
 
 **`expected` closes a startup hole.** Without it the probe would pass as soon as
@@ -159,9 +159,14 @@ is terminal — neither setting can be changed on a live pod, and the `emptyDir`
 dies with the pod.
 
 Where a side cannot read PID 1's link it has proven nothing, so the 0.1.2 check
-is kept and the worker warns once; `topology-warning` is what makes "once"
-survive a fork respawn, and it is the only file here the probe ignores. Both
-degraded states, and why neither reaches the probe's stdout, are in
+is kept and the worker reports it once; `topology-report` is what makes "once"
+survive a fork respawn, and it is the only file here the probe ignores. It is
+claimed under an exclusive lock rather than written through a rename, because
+the runner starts every fork at once and a rename only protects a reader from a
+partial file — it does not stop each fork reading the same stale key and all of
+them claiming the same line. The unsupported-topology ERROR is claimed the same
+way, for the same reason. Both degraded states, and why neither reaches the
+probe's stdout, are in
 [LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
 
 **Files are named by supervisor slot, not by PID.** A fork killed with SIGKILL
@@ -360,6 +365,11 @@ add noise. What gets logged is transitions.
 | the PID topology is proven unsupported | ERROR |
 | the monitor thread caught an exception | ERROR |
 | the monitor could not be started at all | ERROR |
+
+The last three rows are claimed through one file in the marks directory, so a
+worker reports each state once rather than once per fork and once per respawn.
+Only the unsupported topology is an ERROR: it is the probe's verdict as well,
+and no pod recovers from it without being recreated.
 
 The two WARN rows are the states in which the probe keeps its own verdict and
 says nothing extra: an exec probe's stdout is read through the kubelet's

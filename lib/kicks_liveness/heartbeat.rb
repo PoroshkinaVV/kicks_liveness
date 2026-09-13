@@ -102,7 +102,7 @@ module KicksLiveness
       #
       # @param linux [Boolean] injected in specs, where procfs is stubbed
       # @return [Result]
-      def current(linux: RUBY_PLATFORM.include?('linux'))
+      def current(linux: linux?)
         return Result.non_linux unless linux
 
         mine, mine_error = read_link(SELF_NAMESPACE)
@@ -117,6 +117,16 @@ module KicksLiveness
       end
 
       private
+
+      # RUBY_PLATFORM is the cheap answer and the right one on CRuby, where it
+      # names the host. JRuby reports "java" wherever it runs, so the string
+      # alone would put a JRuby worker in a Linux container into the silent
+      # non-Linux fallback and take the guard away without saying so. The
+      # namespace link is Linux-specific, and is only looked at when the
+      # platform string cannot answer — never on the probe's ordinary path.
+      def linux?
+        RUBY_PLATFORM.include?('linux') || (RUBY_PLATFORM == 'java' && File.exist?(SELF_NAMESPACE))
+      end
 
       # Only a comparison both sides of which were read can prove anything.
       # @param mine [String, nil] this process's mount namespace
@@ -266,10 +276,9 @@ module KicksLiveness
     attr_reader :dir
     # @return [Integer] seconds after which a mark is considered stale
     attr_reader :max_age
-    # @return [ContainerGeneration::Result] what this process proved about its incarnation
+    # @return [ContainerGeneration::Result] what this process proved about its
+    #   incarnation, and the incarnation itself where there is one
     attr_reader :topology
-    # @return [String, nil] the container incarnation, when there is one to use
-    attr_reader :generation
 
     # Records how many forks the probe must wait for. Every fork writes the same
     # value. Without it the probe would pass as soon as any single mark was
@@ -325,8 +334,12 @@ module KicksLiveness
     # cause it cannot be changed on a live pod, and the emptyDir dies with that
     # pod.
     #
-    # @return [Integer] bytes written
+    # @return [Integer, nil] bytes written, or nil when this process has not
+    #   proven the topology unsafe and so has nothing to publish
+    # @api private
     def reject_topology!
+      return unless @topology.unsafe?
+
       make_dir
       atomic_write(topology_path, "#{[UNSUPPORTED_TOPOLOGY, @topology.detail].compact.join("\n")}\n")
     end

@@ -108,4 +108,32 @@ RSpec.describe KicksLiveness::ContainerGeneration do
       expect(File).not_to have_received(:readlink).with(%r{\A/proc/})
     end
   end
+
+  # RUBY_PLATFORM names the host on CRuby but is "java" on JRuby wherever it
+  # runs, so the platform string alone would take the guard away from a JRuby
+  # worker in a Linux container, and take it away silently.
+  describe 'deciding whether this is Linux at all' do
+    it 'trusts the platform string on CRuby' do
+      stub_const('RUBY_PLATFORM', 'aarch64-linux')
+      stub_procfs
+
+      expect(described_class.current).to be_verified
+    end
+
+    it 'asks procfs when the platform string cannot answer' do
+      stub_const('RUBY_PLATFORM', 'java')
+      stub_procfs
+      allow(File).to receive(:exist?).with('/proc/self/ns/mnt').and_return(true)
+
+      expect(described_class.current).to be_verified
+    end
+
+    it 'keeps the quiet fallback for the same runtime off Linux' do
+      stub_const('RUBY_PLATFORM', 'java')
+      allow(File).to receive(:exist?).and_call_original
+      allow(File).to receive(:exist?).with('/proc/self/ns/mnt').and_return(false)
+
+      expect(described_class.current).to be_non_linux
+    end
+  end
 end

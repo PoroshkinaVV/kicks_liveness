@@ -17,7 +17,7 @@ module KicksLiveness
       @consumers = consumers
       @config = config
       @heartbeat = heartbeat || Heartbeat.new
-      @attempts = Attempts.new(@heartbeat.dir, generation: @heartbeat.generation)
+      @attempts = Attempts.new(@heartbeat.dir, generation: @heartbeat.topology.generation)
     end
 
     # Declares the expected fork count and starts the tick thread.
@@ -28,7 +28,7 @@ module KicksLiveness
       attempt, elapsed = @attempts.record!(@slot)
       @heartbeat.declare!(@processes)
       attempt > 1 ? report_respawn(attempt, elapsed) : report_first_start
-      report_degraded_topology
+      report_topology
 
       Thread.new do
         Thread.current.name = 'kicks-liveness'
@@ -74,22 +74,26 @@ module KicksLiveness
     # — and leaves the verdict to the probe. Recovery is recreating the pod:
     # neither setting can be changed on a live one.
     def reject_topology!
-      # Logged before the state is published: a marks directory that cannot be
+      # Reported before the state is published: a marks directory that cannot be
       # written to is exactly the case where the log line is all the operator
       # will get.
-      log(:error, "#{Heartbeat::UNSUPPORTED_TOPOLOGY} (#{@heartbeat.topology.detail}); " \
-                  'liveness probes fail until the pod is recreated without those settings')
+      report_topology
       @heartbeat.reject_topology!
       nil
     end
 
-    # Warned from the worker, never from the probe: the probe's stdout is read
+    # Reported from the worker, never from the probe: the probe's stdout is read
     # by a human only through an Unhealthy event, where a repeated diagnostic
     # beside an unrelated reason is worse than useless.
-    def report_degraded_topology
-      warning = TopologyWarning.new(@heartbeat.dir, @heartbeat.topology).claim!
+    #
+    # Deduplicated through the marks directory for the same reason the respawn
+    # counter is: a fork that cannot subscribe comes back every few hundred
+    # milliseconds, and a topology it cannot change would otherwise be reported
+    # on every one of those starts.
+    def report_topology
+      level, message = TopologyReport.new(@heartbeat.dir, @heartbeat.topology).claim!
 
-      log(:warn, warning) if warning
+      log(level, message) if level
     end
 
     def report_first_start

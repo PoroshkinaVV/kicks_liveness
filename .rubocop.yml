@@ -30,7 +30,9 @@ Metrics/MethodLength:
 # logging rules that go with it, and a decision split across two files is
 # harder to follow than a long one in a single place.
 Metrics/ClassLength:
-  Max: 140
+  Exclude:
+    - 'lib/kicks_liveness/heartbeat.rb'
+    - 'lib/kicks_liveness/monitor.rb'
 
 RSpec/MultipleExpectations:
   Max: 5

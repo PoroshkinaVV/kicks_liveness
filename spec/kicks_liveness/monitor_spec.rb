@@ -25,7 +25,7 @@ RSpec.describe KicksLiveness::Monitor do
 
   # The marks directory is the only state that survives a fork, which is what a
   # respawn storm destroys every few hundred milliseconds.
-  def attempts = KicksLiveness::Attempts.new(heartbeat.dir, generation: heartbeat.generation)
+  def attempts = KicksLiveness::Attempts.new(heartbeat.dir, generation: heartbeat.topology.generation)
 
   def errors = logger.lines.select { |line| line.first == :error }
   def warnings = logger.lines.select { |line| line.first == :warn }
@@ -233,7 +233,9 @@ RSpec.describe KicksLiveness::Monitor do
     it 'publishes the fail-closed state and no marks, generation or counter' do
       monitor.start!
 
-      expect(Dir.children(heartbeat.dir)).to eq(['topology-unsafe'])
+      # The report flag is the worker's own bookkeeping; what must not be here
+      # is expected, generation, worker-0 or attempt-0.
+      expect(Dir.children(heartbeat.dir).sort).to eq(%w[topology-report topology-unsafe])
     end
 
     it 'makes the probe fail with the reason an operator can act on' do
@@ -249,6 +251,15 @@ RSpec.describe KicksLiveness::Monitor do
         [:error, a_string_including(KicksLiveness::Heartbeat::UNSUPPORTED_TOPOLOGY)
                    .and(a_string_including('until the pod is recreated'))]
       )
+    end
+
+    # A fork that cannot subscribe comes back every few hundred milliseconds,
+    # and the topology is not something it can change. Reporting per respawn
+    # would be the log storm the respawn counter exists to prevent.
+    it 'reports it once, not on every fork respawn' do
+      3.times { start_incarnation! }
+
+      expect(errors.size).to eq(1)
     end
   end
 

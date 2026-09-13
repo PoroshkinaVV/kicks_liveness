@@ -135,6 +135,14 @@ own procfs, before any freshness check. Proof from either side is enough, and
 nothing weaker takes it back: an inherited `generation` file may still be lying
 in the volume, and marks published by another fork are not evidence of safety.
 
+The worker reports it once at ERROR, naming the detail it proved and the way
+out. Once, not once per fork and not once per respawn: a fork that also cannot
+subscribe comes back every few hundred milliseconds, and a topology it cannot
+change would otherwise fill the log. There is no honest incarnation boundary to
+key that promise to — that the incarnation cannot be trusted is the finding
+itself — so a later container in the same pod stays silent and the verdict is
+read from the probe, in the kubelet's `Unhealthy` event, and from the file.
+
 The state is terminal for the life of the marks volume, and deliberately so.
 Neither setting can be changed on a live pod, and the `emptyDir` is destroyed
 with the pod, so there is no supported transition from this state back to a safe
@@ -165,6 +173,20 @@ is the state it lands in whenever the link cannot be read, and the 0.1.2
 weakness above is then still present. It is warned about once per container
 incarnation, not once per fork, because a respawn loop would otherwise turn one
 lost guarantee into thousands of identical lines.
+
+There is a narrower startup window when the worker and probe have asymmetric
+access: the worker can prove the topology unsafe, but the probe cannot. Before
+that worker reaches the monitor and publishes `topology-unsafe`, the probe can
+accept inherited marks only if the volume already contains a fresh heartbeat
+from an older worker, or from one that also could not prove the topology. Both
+conditions are required. A normal Kubernetes exec probe inherits the
+container's credentials and reaches the same procfs verdict itself; after a
+0.1.3 worker has proved the topology, `topology-unsafe` also survives every
+later restart in the same documented `emptyDir`. The residual window therefore
+requires an in-place restart that also changes the image or effective access,
+or a marks volume that outlives the pod contrary to this setup. In that case the
+probe retains the explicitly degraded 0.1.2 guarantee until the current worker
+publishes its verdict.
 
 ### No generation at all
 

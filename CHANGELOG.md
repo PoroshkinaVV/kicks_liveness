@@ -38,16 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.1.1 freshness-only fallback and warns once for as long as that state lasts.
   Neither state adds anything to the probe's stdout, and the intentional
   non-Linux fallback stays silent.
+- The marks directory gains two files that appear only when something is
+  wrong: `topology-unsafe`, the terminal fail-closed state, and
+  `topology-report`, the worker's own flag for saying each thing once. Tooling
+  that enumerates the directory should allow for both.
 - Add `spec/integration/verify.sh topology`, a Linux matrix covering a shared
   PID namespace, the host PID namespace, a verified private-PID container, and
   a private-PID container whose checker cannot read `/proc/1/ns/mnt`.
 
 ### Changed
 
-- `Heartbeat#declare!` documents its actual `Integer` return value, and
-  `Heartbeat.container_generation` is replaced by `Heartbeat.topology`, which
-  returns a structured result rather than a string or `nil`. Both are `@api
-  private`.
+- `Heartbeat#declare!` documents its actual `Integer` return value.
+- Replace `Heartbeat.container_generation` with `Heartbeat.topology`, which
+  returns a structured result rather than a string or `nil`; rename the
+  `Heartbeat.new` keyword `generation:` to `topology:`, which takes that result;
+  and remove the `KicksLiveness::GenerationGuard` module, whose methods are now
+  private to `Heartbeat`. All three are `@api private`, but a process that
+  called them by name needs updating.
 
 ## [0.1.2] - 2026-09-11
 

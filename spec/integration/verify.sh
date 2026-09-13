@@ -310,7 +310,14 @@ topology_unsafe_case() {
   dock run --detach --name "$worker" "$@" \
     --mount "source=$volume,target=/opt/app/tmp" "$IMAGE" sleep infinity >/dev/null
 
-  expect_state "$label" unsafe "$(topology_state "$worker")"
+  local state
+  state="$(topology_state "$worker")"
+  if [[ "$state" == unverifiable ]]; then
+    echo "$label: this engine refuses the ptrace-level read of /proc/1/ns/mnt, so the topology can only be" >&2
+    echo "$label: reported as unverifiable here. That is the documented weaker outcome, not a regression;" >&2
+    echo "$label: the unverifiable case below is the one that covers it." >&2
+  fi
+  expect_state "$label" unsafe "$state"
 
   # What the previous container left behind, in the format 0.1.2 wrote.
   dock exec "$worker" ruby -e "$PUBLISH_LEGACY_RUBY"
