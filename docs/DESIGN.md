@@ -393,6 +393,12 @@ therefore suspended: the monitor says so once at INFO and keeps the mark fresh,
 so a slow drain gets the full `terminationGracePeriodSeconds` instead of having
 the probe cut it short at `max_age`.
 
+That exemption lasts for the rest of the process and assumes the deadline is
+somebody else's — the kubelet's, during a pod deletion. A SIGTERM that arrives
+any other way enters the same path with nothing bounding it, which is
+[a documented boundary](LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline)
+rather than a property of the design.
+
 The startup grace exists because a slow start and a start that will never finish
 look identical for the first few ticks. Once the grace expires, staying silent
 would mean a pod that never comes up never says so — hence exactly one ERROR,

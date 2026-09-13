@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wrong: `topology-unsafe`, the terminal fail-closed state, and
   `topology-report`, the worker's own flag for saying each thing once. Tooling
   that enumerates the directory should allow for both.
+- Document the boundary of the graceful-shutdown exemption: the monitor
+  suspends its consumer predicate and keeps the heartbeat fresh for the rest of
+  the process, which is safe only while something else owns the shutdown
+  deadline. A SIGTERM that does not come from a pod deletion can therefore
+  leave a pod Ready with no consumers. Existing behavior, newly documented in
+  `docs/LIMITATIONS.md`; bounding it is planned for 0.1.4.
 - Add `spec/integration/verify.sh topology`, a Linux matrix covering a shared
   PID namespace, the host PID namespace, a verified private-PID container, and
   a private-PID container whose checker cannot read `/proc/1/ns/mnt`.

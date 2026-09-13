@@ -78,6 +78,39 @@ flapping pod rather than a storm. And the supervisor respawning failing forks
 inside the container — which is *not* throttled by anything — is now reported:
 see the respawn escalation below.
 
+## Graceful shutdown is safe only when something else owns the deadline
+
+`Sneakers::WorkerGroup#stop` removes consumers before waiting for their thread
+pools to drain. From inside the process that looks exactly like a consumer
+failure, so `Registry.stopping!` deliberately suspends the consumer predicate
+before the first worker stops. The monitor keeps the heartbeat fresh for the
+rest of the process lifetime instead of letting liveness interrupt an in-flight
+job.
+
+That exception assumes an external shutdown deadline. During an ordinary
+Kubernetes pod deletion the assumption holds: the kubelet owns
+`terminationGracePeriodSeconds` and eventually terminates a container whose
+drain does not finish. The fresh heartbeat only prevents the probe from cutting
+the process short before that deadline.
+
+SIGTERM does not prove that the pod is being deleted, however. An operator,
+sidecar, or in-container supervisor can send the same signal while the pod stays
+in service. If Sneakers or Bunny then waits indefinitely while draining or
+reconnecting, there is no kubelet deadline to end it. The process can have zero
+consumers while its heartbeat is refreshed on every tick; the probe continues
+to return success and the pod can remain Ready indefinitely. The process cannot
+distinguish the source of the signal after receiving it.
+
+This is existing shutdown behaviour, not a 0.1.3 regression. Until the exemption
+is bounded — planned for 0.1.4 — send SIGTERM only through a termination path
+that has its own enforced deadline. Use pod deletion for Kubernetes operations.
+An internal supervisor must eventually make PID 1 exit itself, or ask the
+container runtime to stop it, if graceful shutdown does not complete; an
+in-namespace `kill -9 1` is not a reliable escalation even when `kill` reports
+success. Keep the external consumer alert enabled as well: it still sees the
+zero-consumer state that the process-local predicate has intentionally stopped
+evaluating.
+
 ## Changing the worker count at runtime is not supported
 
 `ServerEngine` can re-read its configuration on SIGHUP and scale the fork set,
