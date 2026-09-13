@@ -14,12 +14,22 @@ module KicksLiveness
   # can produce thousands of identical INFO lines and not one ERROR. The
   # directory is the only state that survives the fork.
   #
+  # That directory outlives the container too, which is one restart too many:
+  # the count is about a fork that keeps failing, not about a volume. So each
+  # file carries the container generation, and a file from another generation
+  # counts as no previous start at all. Where there is no generation to write —
+  # off Linux, or where procfs did not yield one — the counter keeps its
+  # generation-less behaviour rather than pretending to a scope it cannot
+  # enforce.
+  #
   # @see file:docs/DESIGN.md#logging-events-not-the-pulse
   # @api private
   class Attempts
     # @param dir [String] marks directory
-    def initialize(dir)
+    # @param generation [String, nil] container incarnation the count belongs to
+    def initialize(dir, generation: nil)
       @dir = dir
+      @generation = generation
     end
 
     # Records a start of this slot.
@@ -63,12 +73,23 @@ module KicksLiveness
     end
 
     # A missing or unreadable counter means "no previous start", never an
-    # exception: this is instrumentation, and it may not break a worker.
+    # exception: this is instrumentation, and it may not break a worker. A
+    # counter from another container means the same thing, so a replacement
+    # container reports its own first start rather than continuing a run it did
+    # not take part in.
     def read(slot)
-      count, epoch = File.read(path(slot)).split
+      count, epoch, generation = File.read(path(slot)).split
+      return [0, nil] unless same_generation?(generation)
+
       [Integer(count), Time.at(Integer(epoch)).utc]
     rescue StandardError
       [0, nil]
+    end
+
+    def same_generation?(declared)
+      return true unless @generation
+
+      declared == "generation=#{@generation}"
     end
 
     # Failing to write degrades the reporting back to one line per respawn,
@@ -76,8 +97,10 @@ module KicksLiveness
     # rather than escalated.
     def write(slot, count, first)
       FileUtils.mkdir_p(@dir)
+      contents = "#{count} #{first.to_i}"
+      contents = "#{contents} generation=#{@generation}" if @generation
       tmp = "#{path(slot)}.#{Process.pid}"
-      File.write(tmp, "#{count} #{first.to_i}\n")
+      File.write(tmp, "#{contents}\n")
       File.rename(tmp, path(slot))
     rescue StandardError
       nil

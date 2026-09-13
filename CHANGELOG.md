@@ -5,6 +5,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-21
+
+### Fixed
+
+- Detect and reject PID topologies in which the container generation cannot
+  identify an incarnation. `shareProcessNamespace: true` and `hostPID: true`
+  leave PID 1 alive across a restart of the worker container, and the mount
+  namespace inode is normally handed straight back to the replacement, so the
+  0.1.2 identifier repeats and an inherited fresh heartbeat could satisfy
+  `startupProbe`. Where the namespace links can be read, both settings are now
+  proven unsafe: the probe exits 1 with
+  `unsupported PID topology: pod must not set shareProcessNamespace or hostPID`,
+  and the worker publishes `<dir>/topology-unsafe` instead of a heartbeat, so a
+  probe that cannot read PID 1's link fails too. The state is terminal for the
+  marks volume; recovery is recreating the pod without those settings. Pods
+  already using either setting will fail their probes after this upgrade
+  instead of silently losing the guarantee.
+- Scope the `attempt-<slot>` respawn counter to the container generation. A
+  replacement container no longer inherits the previous container's unhealthy
+  run: it logs its own `started:` line and cannot escalate over starts it did
+  not take. Where no generation is available the counter keeps its previous
+  volume-wide behavior.
+
+### Added
+
+- Report a degraded container generation once from the worker, at WARN. An
+  unreadable `/proc/1/ns/mnt` is treated as an unverifiable topology rather
+  than as proof of an unsafe one: the 0.1.2 generation check and the probe's
+  own output are unchanged, and the warning is emitted once per container
+  incarnation. A generation that cannot be derived at all on Linux retains the
+  0.1.1 freshness-only fallback and warns once for as long as that state lasts.
+  Neither state adds anything to the probe's stdout, and the intentional
+  non-Linux fallback stays silent.
+- Add `spec/integration/verify.sh topology`, a Linux matrix covering a shared
+  PID namespace, the host PID namespace, a verified private-PID container, and
+  a private-PID container whose checker cannot read `/proc/1/ns/mnt`.
+
+### Changed
+
+- `Heartbeat#declare!` documents its actual `Integer` return value, and
+  `Heartbeat.container_generation` is replaced by `Heartbeat.topology`, which
+  returns a structured result rather than a string or `nil`. Both are `@api
+  private`.
+
 ## [0.1.2] - 2026-09-11
 
 ### Fixed
@@ -73,7 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [docs/](https://github.com/PoroshkinaVV/kicks_liveness/tree/main/docs); start
   with `SETUP.md`, and read `LIMITATIONS.md` before relying on it.
 
-[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/PoroshkinaVV/kicks_liveness/releases/tag/v0.1.0

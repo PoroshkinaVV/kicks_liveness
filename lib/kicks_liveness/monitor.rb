@@ -17,15 +17,18 @@ module KicksLiveness
       @consumers = consumers
       @config = config
       @heartbeat = heartbeat || Heartbeat.new
-      @attempts = Attempts.new(@heartbeat.dir)
+      @attempts = Attempts.new(@heartbeat.dir, generation: @heartbeat.generation)
     end
 
     # Declares the expected fork count and starts the tick thread.
-    # @return [Thread]
+    # @return [Thread, nil] nil when the PID topology is proven unsupported
     def start!
+      return reject_topology! if @heartbeat.topology.unsafe?
+
       attempt, elapsed = @attempts.record!(@slot)
       @heartbeat.declare!(@processes)
       attempt > 1 ? report_respawn(attempt, elapsed) : report_first_start
+      report_degraded_topology
 
       Thread.new do
         Thread.current.name = 'kicks-liveness'
@@ -62,6 +65,32 @@ module KicksLiveness
     end
 
     private
+
+    # A proven shared or host PID namespace is not a degradation to work
+    # around: in it PID 1 belongs to the pod sandbox or the node and survives a
+    # restart of this container, so no mark in this volume can be attributed to
+    # an incarnation at all. The worker therefore publishes the fail-closed
+    # state and nothing else — no generation, no slot mark, no respawn counter
+    # — and leaves the verdict to the probe. Recovery is recreating the pod:
+    # neither setting can be changed on a live one.
+    def reject_topology!
+      # Logged before the state is published: a marks directory that cannot be
+      # written to is exactly the case where the log line is all the operator
+      # will get.
+      log(:error, "#{Heartbeat::UNSUPPORTED_TOPOLOGY} (#{@heartbeat.topology.detail}); " \
+                  'liveness probes fail until the pod is recreated without those settings')
+      @heartbeat.reject_topology!
+      nil
+    end
+
+    # Warned from the worker, never from the probe: the probe's stdout is read
+    # by a human only through an Unhealthy event, where a repeated diagnostic
+    # beside an unrelated reason is worse than useless.
+    def report_degraded_topology
+      warning = TopologyWarning.new(@heartbeat.dir, @heartbeat.topology).claim!
+
+      log(:warn, warning) if warning
+    end
 
     def report_first_start
       log(:info, "started: dir=#{@heartbeat.dir} max_age=#{@heartbeat.max_age}s tick=#{@config.tick}s " \

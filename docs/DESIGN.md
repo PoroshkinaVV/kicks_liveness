@@ -112,10 +112,12 @@ silently. That is the thing to re-check when upgrading Bunny.
 ## The mark files
 
 ```
-<dir>/expected       how many forks the probe must wait for
-<dir>/generation     which container incarnation wrote this heartbeat
-<dir>/worker-<slot>  one per fork, refreshed every tick the fork is healthy
-<dir>/attempt-<slot> starts of a slot that has not become healthy yet
+<dir>/expected         how many forks the probe must wait for
+<dir>/generation       which container incarnation wrote this heartbeat
+<dir>/worker-<slot>    one per fork, refreshed every tick the fork is healthy
+<dir>/attempt-<slot>   starts of a slot that has not become healthy yet
+<dir>/topology-unsafe  the PID namespace is not this container's: fail closed
+<dir>/topology-warning what the worker has already warned about, once
 ```
 
 **`expected` closes a startup hole.** Without it the probe would pass as soon as
@@ -140,12 +142,27 @@ container declares itself and every current fork publishes its own mark, files
 inherited from the previous container are rejected. Nothing outside the marks
 directory is removed.
 
-This guarantee assumes Kubernetes' default container-private PID namespace.
-With `shareProcessNamespace: true` PID 1 belongs to the pod sandbox, and with
-`hostPID: true` it is the node init process; neither restarts with the worker
-container. Under either setting the guard can accept an inherited fresh mark.
-Do not enable them on a pod whose startup probe relies on this guarantee; see
-[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
+**`topology-unsafe` is the fail-closed half of that.** The identifier is an
+incarnation only where the container owns PID 1, which is not true under
+`shareProcessNamespace: true` or `hostPID: true` — there PID 1 outlives the
+worker container and the generation repeats. Each side compares
+`/proc/1/ns/mnt` with `/proc/self/ns/mnt` to find out, and the two sides can
+legitimately differ, because procfs access is local to a process and their
+credentials need not match.
+
+So the verdict is shared rather than owned. A worker that can prove the topology
+unsafe writes this file instead of a heartbeat, and every probe reads it before
+anything else — before `expected`, before its own procfs, before freshness. Not
+writing a new `generation` would not be enough: an inherited one may still be in
+the volume. Proof from either side wins, nothing weaker clears it, and the state
+is terminal — neither setting can be changed on a live pod, and the `emptyDir`
+dies with the pod.
+
+Where a side cannot read PID 1's link it has proven nothing, so the 0.1.2 check
+is kept and the worker warns once; `topology-warning` is what makes "once"
+survive a fork respawn, and it is the only file here the probe ignores. Both
+degraded states, and why neither reaches the probe's stdout, are in
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
 
 **Files are named by supervisor slot, not by PID.** A fork killed with SIGKILL
 is respawned into the same slot and overwrites its own file. Had the name
@@ -162,9 +179,11 @@ probe sees either the old value or the new one.
 **`attempt-<slot>` is the respawn counter**, and it lives in this directory for
 the single reason that the directory outlives the fork: a monitor caught in a
 respawn loop is a brand-new object every few hundred milliseconds and can hold
-no counter of its own. The file is removed once the slot becomes healthy, so in
-steady state the directory holds `expected`, `generation`, and the
-`worker-<slot>` marks. What the counter is for is in
+no counter of its own. It outlives the *container* too, which is one restart too
+many, so the file carries the generation that wrote it and one from another
+generation counts as no previous start. The file is removed once the slot
+becomes healthy, so in steady state the directory holds `expected`,
+`generation`, and the `worker-<slot>` marks. What the counter is for is in
 [LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).
 
 The timestamp, pid, and slot in `worker-<slot>` exist for a human running
@@ -331,14 +350,24 @@ add noise. What gets logged is transitions.
 | Event | Level |
 |---|---|
 | started, with the effective settings | INFO |
+| the PID topology could not be verified, or yielded no generation | WARN |
 | waiting for consumers | INFO |
 | became healthy | INFO |
 | shutting down | INFO |
 | still not healthy after `startup_grace_ticks` ticks | ERROR |
 | was healthy, became unhealthy | ERROR |
 | a slot respawning without ever becoming healthy, once per grace window | ERROR |
+| the PID topology is proven unsupported | ERROR |
 | the monitor thread caught an exception | ERROR |
 | the monitor could not be started at all | ERROR |
+
+The two WARN rows are the states in which the probe keeps its own verdict and
+says nothing extra: an exec probe's stdout is read through the kubelet's
+`Unhealthy` event, so a diagnostic appended there would repeat on every
+invocation beside reasons it has nothing to do with. Each is reported once — per
+container incarnation where there is a generation to key that to, and otherwise
+for as long as the error state lasts, because a fork respawn would otherwise
+repeat it every few hundred milliseconds.
 
 ERROR is reserved for genuine failure. A logger typically comes up with
 `LOG_LEVEL` defaulting to `error`, so anything important must survive that

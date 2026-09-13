@@ -92,34 +92,111 @@ count and the retired slots eventually go stale. Neither direction is safe.
 
 If you change `workers`, restart the runner. Runtime scaling is not supported.
 
-## Container generations require Linux procfs and container-owned PID 1
+## Container generations need Linux procfs and a private PID namespace
 
 Kubernetes keeps an `emptyDir` across restarts of a container in the same pod.
-To prevent the next container from inheriting a fresh heartbeat, the worker and
-exec probe independently identify their shared incarnation from Linux procfs:
-the mount namespace plus PID 1 start time. No application cache is removed.
+To stop the next container inheriting a fresh heartbeat, the worker and its exec
+probe independently identify their shared incarnation from Linux procfs: the
+mount namespace plus PID 1 start time. No application cache is removed.
 
-The identifier also assumes that the container owns PID 1. With
-`shareProcessNamespace: true`, PID 1 is the pod sandbox, and with
-`hostPID: true` it is the node's init process; neither restarts when the worker
-container does, so the start-time half of the identifier stays constant. The
-mount namespace inode is then the only remaining signal, and the kernel
-normally hands the just-released inode back to the replacement container in an
-otherwise quiet pod. Under either setting the guard silently degrades to the
-0.1.1 freshness-only behavior and can accept a fresh mark from the previous
-container. Do not enable either setting on a pod whose `startupProbe` relies on
-this guarantee.
+That is an incarnation only where the container owns PID 1. With
+`shareProcessNamespace: true` PID 1 is the pod sandbox; with `hostPID: true` it
+is the node's init process. Neither restarts when the worker container does, so
+the start-time half of the identifier stays constant — and the mount namespace
+inode does not rescue it, because procfs hands out the lowest free inode and a
+quiet restart normally gets back the one it just released. Both halves repeat,
+so under the 0.1.2 rule an inherited fresh mark satisfied the startup probe.
+Watched, computing that rule by hand after a container restart, in
+[VERIFYING.md](VERIFYING.md#12-a-shared-or-host-pid-namespace-is-rejected):
 
-If procfs is unavailable — for example, when using the gem outside a Linux
-container — generation detection falls back to the original freshness-only
-check. The worker and probe still function, but they cannot distinguish a fresh
-mark left by a previous process from one written by the current process. Linux
-Kubernetes, Docker, and Nomad containers expose the required procfs entries
-under their normal configuration.
+```
+shared-pid: 0.1.2 generation before=mnt:[4026532693]:17207878 after=mnt:[4026532693]:17207878
+host-pid:   0.1.2 generation before=mnt:[4026532699]:105      after=mnt:[4026532699]:105
+```
+
+Since 0.1.3 that is detected rather than merely documented. Each side compares
+`/proc/1/ns/mnt` with `/proc/self/ns/mnt`, and what it can prove decides what
+happens.
+
+### Proven unsafe: the probe fails, and keeps failing
+
+Both links readable and different is proof that PID 1 belongs to something
+outside this container. The probe exits 1 with
+
+```
+unsupported PID topology: pod must not set shareProcessNamespace or hostPID
+```
+
+Neither participant owns that verdict alone, because procfs access is local to a
+process and the worker's credentials need not match the probe's. So a worker
+that can prove it publishes `topology-unsafe` in the marks directory instead of
+a heartbeat, and every probe reads that first — before `expected`, before its
+own procfs, before any freshness check. Proof from either side is enough, and
+nothing weaker takes it back: an inherited `generation` file may still be lying
+in the volume, and marks published by another fork are not evidence of safety.
+
+The state is terminal for the life of the marks volume, and deliberately so.
+Neither setting can be changed on a live pod, and the `emptyDir` is destroyed
+with the pod, so there is no supported transition from this state back to a safe
+one. **Recovery is recreating the pod without those settings.** Until then the
+container fails its probes and restarts, which is the honest outcome: the
+alternative is a pod that looks healthy while nothing guarantees the heartbeat
+belongs to the process that is running.
+
+### Unverifiable: the 0.1.2 guarantee, and one warning
+
+Reading another process's namespace link is a ptrace-level operation, so
+`/proc/1/ns/mnt` can be unreadable — most simply when PID 1 runs as a different
+user. That is *not* proof of anything, and treating it as proof would fail a
+correctly configured private-PID deployment closed.
+
+So the generation is derived and checked exactly as 0.1.2 checked it, the probe
+behaves and prints exactly as it otherwise would, and the worker logs one
+warning:
+
+```
+WARN [liveness] slot 0: PID topology unverified (cannot read /proc/1/ns/mnt (Errno::EACCES)):
+the container generation still scopes the heartbeat, but shareProcessNamespace and hostPID
+cannot be ruled out
+```
+
+Read that as unverifiable, not as safe: if the pod does set one of the two, this
+is the state it lands in whenever the link cannot be read, and the 0.1.2
+weakness above is then still present. It is warned about once per container
+incarnation, not once per fork, because a respawn loop would otherwise turn one
+lost guarantee into thousands of identical lines.
+
+### No generation at all
+
+If procfs yields no identifier — `/proc/self/ns/mnt` or `/proc/1/stat` missing,
+unreadable, or unparseable — the guard falls back to the 0.1.1 freshness-only
+check, which cannot tell a fresh mark left by the previous container from one
+written by this process. The worker warns once for as long as that state lasts,
+and a later successful derivation clears the flag so a new degradation is
+reported again:
+
+```
+WARN [liveness] slot 0: no container generation (cannot read /proc/1/stat (Errno::EACCES)):
+falling back to freshness only, which cannot reject a heartbeat inherited from a previous
+container
+```
+
+Off Linux there is no procfs to read, and the same fallback applies **silently**:
+that is an intentional compatibility mode — the gem outside a Linux container —
+rather than a Linux environment where a value that exists in principle could not
+be read. Linux Kubernetes, Docker, and Nomad containers expose the required
+entries under their normal configuration.
+
+Neither fallback is ever reported on the probe's stdout. An exec probe's output
+reaches a human only through the kubelet's `Unhealthy` event, where a diagnostic
+repeated on every invocation would sit beside reasons it has nothing to do with.
+A proven unsafe topology is different: there the verdict *is* the probe's answer.
+
+### The probe must run in the worker's container
 
 The worker and its exec probe must run in the **same container**. A neighbouring
-sidecar can mount the same `emptyDir`, but it has a different mount namespace
-and therefore treats the worker's marks as belonging to another container.
+sidecar can mount the same `emptyDir`, but it has a different mount namespace and
+therefore treats the worker's marks as belonging to another container.
 Kubernetes exec probes already run inside the container they check; do not move
 `kicks-liveness` into a separate health sidecar.
 
@@ -143,14 +220,14 @@ reports the elapsed time and the number of starts:
 The number of starts is the diagnosis: it separates a slow start from a respawn
 loop at a glance.
 
-This unhealthy-run counter is scoped to the marks volume, not to the container
-generation. If a container is restarted before its slot has ever become
-healthy, the replacement continues the same count: its repeated `started:` line
-is suppressed, and an expired grace window may immediately report an ERROR that
-includes starts from the previous container. This is diagnostic state only; it
-does not participate in the probe result, and the first healthy tick removes
-it. Treat the count as "starts since this slot was last healthy in this pod",
-not "starts in this container".
+The count belongs to a container, not to a volume: each `attempt-<slot>` file
+carries the generation that wrote it, and one from another generation counts as
+no previous start. A replacement container therefore logs its own `started:`
+line and never escalates over starts it did not take. Where there is no
+generation to write — off Linux, or where procfs did not yield one — the counter
+keeps its volume-wide 0.1.1 scope, because there is nothing honest to scope it
+to; treat the count there as "starts since this slot was last healthy in this
+pod".
 
 ## Do not install both `kicks` and `sneakers`
 

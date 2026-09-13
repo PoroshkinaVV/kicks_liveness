@@ -11,6 +11,10 @@ class FakeLogger
     @lines << [:info, message]
   end
 
+  def warn(message)
+    @lines << [:warn, message]
+  end
+
   def error(message)
     @lines << [:error, message]
   end

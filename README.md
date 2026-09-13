@@ -14,10 +14,11 @@ The probe only reads that heartbeat, scoped to the current container
 incarnation. No application boot, no network call, and no healthy replica
 hiding a stalled one.
 
-That restart scoping assumes Kubernetes' default container-private PID
-namespace; see
-[Limitations](docs/LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1)
-for pods that set `shareProcessNamespace` or `hostPID`.
+That restart scoping needs Kubernetes' default container-private PID
+namespace. A pod that sets `shareProcessNamespace` or `hostPID` is detected and
+rejected rather than silently unscoped; see
+[Limitations](docs/LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace)
+for what each side can prove and what it does when it cannot.
 
 ## Install: one line in Rails
 

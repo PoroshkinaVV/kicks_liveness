@@ -184,3 +184,14 @@ One `worker-<slot>` file per fork, plus `expected` and the current container
 have not finished subscribing. A slot that keeps restarting without ever
 subscribing also leaves an `attempt-<slot>` file, which is removed as soon as
 that slot becomes healthy.
+
+The `generation` file is authoritative only while procfs generation detection is
+available: where it is not, the worker writes no generation and a file left by
+an earlier container stays visible, so `kubectl exec ... cat <dir>/generation`
+can show a stale incarnation. It is not deleted in that state on purpose —
+removing it could fail a concurrently running probe that does have a valid
+generation, for a reason that has nothing to do with the worker's health. Two
+further files appear only when something is wrong: `topology-unsafe`, which
+fails every probe until the pod is recreated, and `topology-warning`, which is
+how the worker keeps its degradation warning to one line. Both are explained in
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).

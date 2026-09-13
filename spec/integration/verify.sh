@@ -20,6 +20,15 @@ MANAGED_BY_VALUE=kicks-liveness-fixture
 DOCKER_CONTEXT_NAME="${KICKS_LIVENESS_DOCKER_CONTEXT:-desktop-linux}"
 
 kube() { kubectl --context "$CONTEXT" --namespace "$NAMESPACE" "$@"; }
+dock() { docker --context "$DOCKER_CONTEXT_NAME" "$@"; }
+
+require_image() {
+  if ! dock image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "no image '$IMAGE' in Docker context '$DOCKER_CONTEXT_NAME': run '$0 build' first" >&2
+    return 1
+  fi
+}
+
 
 guard() {
   if ! kubectl config get-contexts -o name | grep -qx "$CONTEXT"; then
@@ -53,7 +62,7 @@ require_managed_namespace() {
 }
 
 cmd_build() {
-  docker --context "$DOCKER_CONTEXT_NAME" build \
+  dock build \
     --build-arg "AMQP_WORKER_GEM=$WORKER_GEM" \
     -f "$ROOT/spec/integration/fixture/Dockerfile" -t "$IMAGE" "$ROOT"
 }
@@ -118,16 +127,15 @@ cmd_probe() {
 
 cleanup_generation_restart() {
   if [[ -n "${GENERATION_CONTAINER:-}" ]]; then
-    docker --context "$DOCKER_CONTEXT_NAME" rm --force "$GENERATION_CONTAINER" >/dev/null 2>&1 || true
+    dock rm --force "$GENERATION_CONTAINER" >/dev/null 2>&1 || true
   fi
   if [[ -n "${GENERATION_VOLUME:-}" ]]; then
-    docker --context "$DOCKER_CONTEXT_NAME" volume rm "$GENERATION_VOLUME" >/dev/null 2>&1 || true
+    dock volume rm "$GENERATION_VOLUME" >/dev/null 2>&1 || true
   fi
 }
 
 generation_probe() {
-  docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
-    ruby -e 'require %q(kicks_liveness/probe)'
+  dock exec "$GENERATION_CONTAINER" ruby -e 'require %q(kicks_liveness/probe)'
 }
 
 wait_for_generation_probe() {
@@ -145,17 +153,14 @@ wait_for_generation_probe() {
 }
 
 cmd_generation_restart() {
-  if ! docker --context "$DOCKER_CONTEXT_NAME" image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "no image '$IMAGE' in Docker context '$DOCKER_CONTEXT_NAME': run '$0 build' first" >&2
-    return 1
-  fi
+  require_image
 
   GENERATION_CONTAINER="kicks-liveness-generation-$$"
   GENERATION_VOLUME="${GENERATION_CONTAINER}-state"
   trap cleanup_generation_restart EXIT
 
-  docker --context "$DOCKER_CONTEXT_NAME" volume create "$GENERATION_VOLUME" >/dev/null
-  docker --context "$DOCKER_CONTEXT_NAME" run --detach \
+  dock volume create "$GENERATION_VOLUME" >/dev/null
+  dock run --detach \
     --name "$GENERATION_CONTAINER" \
     --mount "source=$GENERATION_VOLUME,target=/opt/app/tmp" \
     "$IMAGE" sh -c '
@@ -171,14 +176,14 @@ cmd_generation_restart() {
 
   wait_for_generation_probe >/dev/null
   local before_generation
-  before_generation="$(docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
-    cat /opt/app/tmp/health/generation)"
+  before_generation="$(dock exec "$GENERATION_CONTAINER" cat /opt/app/tmp/health/generation)"
+  expect_state 'generation-restart' verified "$(topology_state "$GENERATION_CONTAINER")"
 
-  docker --context "$DOCKER_CONTEXT_NAME" restart --time 1 "$GENERATION_CONTAINER" >/dev/null
+  dock restart --time 1 "$GENERATION_CONTAINER" >/dev/null
 
   local after_generation
-  after_generation="$(docker --context "$DOCKER_CONTEXT_NAME" exec "$GENERATION_CONTAINER" \
-    ruby -r kicks_liveness/heartbeat -e 'print KicksLiveness::Heartbeat.container_generation')"
+  after_generation="$(dock exec "$GENERATION_CONTAINER" \
+    ruby -r kicks_liveness/heartbeat -e 'print KicksLiveness::Heartbeat.topology.generation')"
   if [[ "$before_generation" == "$after_generation" ]]; then
     echo "container generation did not change: $before_generation" >&2
     return 1
@@ -204,6 +209,205 @@ cmd_generation_restart() {
   printf 'recovered=%s\n' "$recovered_output"
 }
 
+# The PID topology matrix. Docker only: no cluster and no broker, because every
+# case here is about which PID namespace the worker container is in, which is
+# the one thing the container generation depends on.
+TOPOLOGY_MESSAGE='unsupported PID topology: pod must not set shareProcessNamespace or hostPID'
+TOPOLOGY_RESOURCES=()
+
+cleanup_topology() {
+  local resource
+  for resource in "${TOPOLOGY_RESOURCES[@]:-}"; do
+    case "$resource" in
+      container:*) dock rm --force "${resource#container:}" >/dev/null 2>&1 || true ;;
+      volume:*) dock volume rm "${resource#volume:}" >/dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
+# The 0.1.2 identifier, computed the way 0.1.2 computed it. The point of the two
+# unsafe cases is that this value survives a restart of the worker container, so
+# it has to come from the old rule rather than from the code under test.
+LEGACY_GENERATION_RUBY='
+  stat = File.read("/proc/1/stat")
+  print "#{File.readlink("/proc/self/ns/mnt")}:#{stat[(stat.rindex(") ") + 2)..].split[19]}"
+'
+
+# A complete, fresh heartbeat in the 0.1.2 format: what a formerly healthy
+# container leaves in the volume, and what a 0.1.2 probe accepts.
+PUBLISH_LEGACY_RUBY='
+  require "fileutils"
+  stat = File.read("/proc/1/stat")
+  generation = "#{File.readlink("/proc/self/ns/mnt")}:#{stat[(stat.rindex(") ") + 2)..].split[19]}"
+  dir = ENV.fetch("KICKS_LIVENESS_DIR")
+  FileUtils.mkdir_p(dir)
+  File.write("#{dir}/generation", generation)
+  File.write("#{dir}/expected", "1")
+  File.write("#{dir}/worker-0", "#{Time.now.utc.strftime("%FT%TZ")} pid=1 slot=0 generation=#{generation}\n")
+'
+
+# Marks from a container that is not this one, in the current format.
+PUBLISH_FOREIGN_RUBY='
+  dir = ENV.fetch("KICKS_LIVENESS_DIR")
+  File.write("#{dir}/generation", "mnt:[0]:1")
+  File.write("#{dir}/expected", "1")
+  File.write("#{dir}/worker-0", "#{Time.now.utc.strftime("%FT%TZ")} pid=1 slot=0 generation=mnt:[0]:1\n")
+'
+
+PUBLISH_RUBY='
+  heartbeat = KicksLiveness::Heartbeat.new
+  heartbeat.declare!(1)
+  heartbeat.touch!(0)
+'
+
+# Three incarnations of the monitor, which is what a fork respawn produces: a
+# brand-new object every few hundred milliseconds, with nothing in memory to
+# remember what the previous one said.
+RESPAWN_RUBY='
+  require "kicks_liveness"
+  require "logger"
+  KicksLiveness.config.logger = Logger.new($stdout)
+  3.times do
+    KicksLiveness::Monitor.new(slot: 0, processes: 1, consumers: 1, config: KicksLiveness.config).start!&.kill
+  end
+'
+
+legacy_generation() { dock exec "$@" ruby -e "$LEGACY_GENERATION_RUBY"; }
+topology_state() { dock exec "$@" ruby -r kicks_liveness/heartbeat -e 'print KicksLiveness::Heartbeat.topology.state'; }
+
+probe_in() {
+  PROBE_STATUS=0
+  PROBE_OUTPUT="$(dock exec "$@" ruby -e 'require %q(kicks_liveness/probe)' 2>&1)" || PROBE_STATUS=$?
+}
+
+expect_probe() {
+  local label="$1" status="$2" output="$3"
+  if [[ "$PROBE_STATUS" -ne "$status" || "$PROBE_OUTPUT" != "$output" ]]; then
+    echo "$label: expected exit $status and '$output', got exit=$PROBE_STATUS '$PROBE_OUTPUT'" >&2
+    return 1
+  fi
+  printf '%s: exit=%s %s\n' "$label" "$PROBE_STATUS" "$PROBE_OUTPUT"
+}
+
+expect_state() {
+  local label="$1" expected="$2" actual="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$label: expected topology '$expected', got '$actual'" >&2
+    return 1
+  fi
+  printf '%s: topology=%s\n' "$label" "$actual"
+}
+
+# Kubernetes shareProcessNamespace and hostPID, as far as Docker can reproduce
+# them: in both, PID 1 is outside the worker container and outlives its restart.
+topology_unsafe_case() {
+  local label="$1"
+  shift
+
+  local worker="kicks-liveness-$label-$$" volume="kicks-liveness-$label-$$-state"
+  TOPOLOGY_RESOURCES+=("container:$worker" "volume:$volume")
+  dock volume create "$volume" >/dev/null
+  dock run --detach --name "$worker" "$@" \
+    --mount "source=$volume,target=/opt/app/tmp" "$IMAGE" sleep infinity >/dev/null
+
+  expect_state "$label" unsafe "$(topology_state "$worker")"
+
+  # What the previous container left behind, in the format 0.1.2 wrote.
+  dock exec "$worker" ruby -e "$PUBLISH_LEGACY_RUBY"
+  local before after
+  before="$(legacy_generation "$worker")"
+  dock restart --time 1 "$worker" >/dev/null
+  after="$(legacy_generation "$worker")"
+  printf '%s: 0.1.2 generation before=%s after=%s\n' "$label" "$before" "$after"
+  if [[ "$before" != "$after" ]]; then
+    echo "$label: the 0.1.2 generation did not repeat, so this run does not demonstrate the defect" >&2
+    echo "$label: PID 1 start time is unchanged either way; the mount namespace inode was not reused" >&2
+    return 1
+  fi
+
+  # The probe on its own, before any 0.1.3 worker has published anything here:
+  # the marks are complete and fresh, and 0.1.2 would have accepted them.
+  probe_in "$worker"
+  expect_probe "$label inherited heartbeat" 1 "$TOPOLOGY_MESSAGE"
+
+  # And the worker: the fail-closed state instead of marks of its own.
+  dock exec "$worker" ruby -r kicks_liveness/heartbeat -e "$PUBLISH_RUBY"
+  printf '%s: marks directory holds %s\n' "$label" \
+    "$(dock exec "$worker" sh -c 'ls /opt/app/tmp/health | tr "\n" " "')"
+  dock exec "$worker" test -f /opt/app/tmp/health/topology-unsafe
+  probe_in "$worker"
+  expect_probe "$label after the worker published" 1 "$TOPOLOGY_MESSAGE"
+}
+
+# The positive control: an ordinary container, owning PID 1.
+topology_private_case() {
+  local worker="kicks-liveness-private-pid-$$"
+  TOPOLOGY_RESOURCES+=("container:$worker")
+  dock run --detach --name "$worker" "$IMAGE" sleep infinity >/dev/null
+
+  expect_state private-pid verified "$(topology_state "$worker")"
+  dock exec "$worker" ruby -r kicks_liveness/heartbeat -e "$PUBLISH_RUBY"
+  probe_in "$worker"
+  expect_probe private-pid 0 '1 process(es) healthy'
+}
+
+# The second positive control: a private-PID container whose checker cannot read
+# /proc/1/ns/mnt. The topology is then unverifiable rather than proven, which
+# must keep the 0.1.2 generation check and cost exactly one worker warning —
+# never a permanently red probe.
+#
+# It is constructed here by running the checker as a user other than PID 1's.
+# That is not what a Kubernetes exec probe does: an exec probe has no user
+# setting of its own and normally inherits the container process credentials.
+# It is simply the one way to produce an unreadable namespace link without a
+# custom procfs mount.
+topology_unverifiable_case() {
+  local worker="kicks-liveness-unverifiable-$$"
+  TOPOLOGY_RESOURCES+=("container:$worker")
+  dock run --detach --name "$worker" "$IMAGE" \
+    sh -c 'mkdir -p "$KICKS_LIVENESS_DIR" && chmod 0777 "$KICKS_LIVENESS_DIR" && exec sleep infinity' >/dev/null
+
+  local as_other_user=(--user 1000:1000 "$worker")
+  expect_state unverifiable unverifiable "$(topology_state "${as_other_user[@]}")"
+
+  local warnings
+  warnings="$(dock exec "${as_other_user[@]}" ruby -e "$RESPAWN_RUBY" 2>&1 |
+    grep -c 'PID topology unverified' || true)"
+  if [[ "$warnings" != 1 ]]; then
+    echo "unverifiable: expected exactly one warning across three fork respawns, got $warnings" >&2
+    return 1
+  fi
+  printf 'unverifiable: warnings across three fork respawns=%s\n' "$warnings"
+
+  dock exec "${as_other_user[@]}" ruby -e "$PUBLISH_FOREIGN_RUBY"
+  probe_in "${as_other_user[@]}"
+  expect_probe 'unverifiable inherited heartbeat' 1 \
+    'heartbeat belongs to a previous container: worker has not started yet'
+
+  dock exec "${as_other_user[@]}" ruby -r kicks_liveness/heartbeat -e "$PUBLISH_RUBY"
+  probe_in "${as_other_user[@]}"
+  expect_probe 'unverifiable own heartbeat' 0 '1 process(es) healthy'
+}
+
+cmd_topology() {
+  require_image
+  trap cleanup_topology EXIT
+
+  local sandbox="kicks-liveness-sandbox-$$"
+  TOPOLOGY_RESOURCES+=("container:$sandbox")
+  dock run --detach --name "$sandbox" "$IMAGE" sleep infinity >/dev/null
+
+  # Kubernetes shareProcessNamespace: true — PID 1 is the pod sandbox.
+  topology_unsafe_case shared-pid --pid "container:$sandbox"
+  # Kubernetes hostPID: true — PID 1 is the node's init process. Reading its
+  # namespace link is a ptrace-level operation, and a container without
+  # CAP_SYS_PTRACE is normally refused; where it is refused the outcome is the
+  # weaker "unverifiable" the case below covers.
+  topology_unsafe_case host-pid --pid host --cap-add SYS_PTRACE
+  topology_private_case
+  topology_unverifiable_case
+}
+
 cmd_marks() { guard; kube exec deploy/worker -- ls -l /opt/app/tmp/health/; }
 cmd_logs()  { guard; kube logs deploy/worker --tail="${1:-50}"; }
 cmd_ui()    { guard; kube port-forward deploy/rabbitmq 15672:15672; }
@@ -214,12 +418,13 @@ case "${1:-}" in
   down) cmd_down ;;
   probe) cmd_probe ;;
   generation-restart) cmd_generation_restart ;;
+  topology) cmd_topology ;;
   marks) cmd_marks ;;
   logs) shift; cmd_logs "${1:-50}" ;;
   ui) cmd_ui ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 {build|up|down|probe|generation-restart|marks|logs [n]|ui|status}" >&2
+    echo "usage: $0 {build|up|down|probe|generation-restart|topology|marks|logs [n]|ui|status}" >&2
     exit 64
     ;;
 esac

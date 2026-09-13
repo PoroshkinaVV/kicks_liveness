@@ -1,6 +1,7 @@
 require_relative 'kicks_liveness/version'
 require_relative 'kicks_liveness/heartbeat'
 require_relative 'kicks_liveness/attempts'
+require_relative 'kicks_liveness/topology_warning'
 require_relative 'kicks_liveness/configuration'
 require_relative 'kicks_liveness/registry'
 require_relative 'kicks_liveness/monitor'
@@ -76,7 +77,8 @@ module KicksLiveness
     # @param slot [Integer] supervisor slot of this fork
     # @param processes [Integer] how many forks the probe must wait for
     # @param consumers [Integer] how many workers must subscribe here
-    # @return [Thread, nil] nil when disabled by configuration
+    # @return [Thread, nil] nil when disabled by configuration, or when the PID
+    #   topology is proven unsupported
     # @api private
     def start!(slot:, processes:, consumers:)
       return unless config.enabled?

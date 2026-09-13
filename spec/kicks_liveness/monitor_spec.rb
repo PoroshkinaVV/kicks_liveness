@@ -6,7 +6,8 @@ RSpec.describe KicksLiveness::Monitor do
   end
 
   let(:tmp) { Dir.mktmpdir }
-  let(:heartbeat) { KicksLiveness::Heartbeat.new(dir: File.join(tmp, 'health'), max_age: 45) }
+  let(:topology) { verified_topology('mnt:[2]:200') }
+  let(:heartbeat) { KicksLiveness::Heartbeat.new(dir: File.join(tmp, 'health'), max_age: 45, topology: topology) }
   let(:logger) { FakeLogger.new }
 
   let(:config) do
@@ -16,16 +17,24 @@ RSpec.describe KicksLiveness::Monitor do
       c.startup_grace_ticks = 3
     end
   end
-  # The marks directory is the only state that survives a fork, which is what a
-  # respawn storm destroys every few hundred milliseconds.
-  let(:attempts) { KicksLiveness::Attempts.new(heartbeat.dir) }
 
   after { FileUtils.remove_entry(tmp) }
 
   def unhealthy! = allow(KicksLiveness::Registry).to receive(:healthy?).and_return(false)
   def healthy! = allow(KicksLiveness::Registry).to receive(:healthy?).and_return(true)
 
+  # The marks directory is the only state that survives a fork, which is what a
+  # respawn storm destroys every few hundred milliseconds.
+  def attempts = KicksLiveness::Attempts.new(heartbeat.dir, generation: heartbeat.generation)
+
   def errors = logger.lines.select { |line| line.first == :error }
+  def warnings = logger.lines.select { |line| line.first == :warn }
+
+  # Every incarnation of the monitor is a fresh object, exactly as a new fork
+  # would be.
+  def start_incarnation!
+    described_class.new(slot: 0, processes: 1, consumers: 1, config: config, heartbeat: heartbeat).start!
+  end
 
   describe '#tick!' do
     it 'writes the mark when healthy' do
@@ -208,6 +217,175 @@ RSpec.describe KicksLiveness::Monitor do
     end
   end
 
+  # Neither the worker nor the probe owns this verdict alone: their procfs
+  # access is local to each process. A worker that can prove the topology
+  # unsafe publishes that proof rather than a heartbeat, so a probe that cannot
+  # prove it still rejects.
+  describe 'a proven unsupported PID topology' do
+    let(:topology) { unsafe_topology }
+
+    before { allow(Thread).to receive(:new) }
+
+    it 'starts no monitor thread' do
+      expect(monitor.start!).to be_nil
+    end
+
+    it 'publishes the fail-closed state and no marks, generation or counter' do
+      monitor.start!
+
+      expect(Dir.children(heartbeat.dir)).to eq(['topology-unsafe'])
+    end
+
+    it 'makes the probe fail with the reason an operator can act on' do
+      monitor.start!
+
+      expect(heartbeat.check).to eq([false, KicksLiveness::Heartbeat::UNSUPPORTED_TOPOLOGY])
+    end
+
+    it 'reports it at ERROR, naming both settings and the way out' do
+      monitor.start!
+
+      expect(logger.lines).to contain_exactly(
+        [:error, a_string_including(KicksLiveness::Heartbeat::UNSUPPORTED_TOPOLOGY)
+                   .and(a_string_including('until the pod is recreated'))]
+      )
+    end
+  end
+
+  # The probe must keep printing its own success or failure and nothing else:
+  # its stdout is read through an Unhealthy event, where a diagnostic repeated
+  # beside an unrelated reason is worse than useless. So the worker warns.
+  describe 'a topology that could not be verified' do
+    let(:topology) { unverifiable_topology('mnt:[2]:200') }
+
+    before do
+      unhealthy!
+      allow(Thread).to receive(:new)
+    end
+
+    it 'warns once, whatever the generation check still guarantees' do
+      3.times { start_incarnation! }
+
+      expect(warnings).to contain_exactly(
+        [:warn, '[liveness] slot 0: PID topology unverified (cannot read /proc/1/ns/mnt (Errno::EACCES)): ' \
+                'the container generation still scopes the heartbeat, but shareProcessNamespace and hostPID ' \
+                'cannot be ruled out']
+      )
+    end
+
+    it 'keeps the 0.1.2 generation check and the probe message unchanged' do
+      healthy!
+      monitor.tick!
+
+      expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
+    end
+
+    # A generation it cannot verify is still a generation, and still the right
+    # scope for a count that belongs to one container.
+    it 'scopes the respawn counter to the generation it does have' do
+      KicksLiveness::Attempts.new(heartbeat.dir, generation: 'mnt:[1]:100').record!(0, now: Time.now.utc - 31)
+
+      start_incarnation!
+
+      expect(errors).to be_empty
+    end
+  end
+
+  describe 'a generation that could not be derived on Linux' do
+    let(:topology) { unavailable_topology }
+
+    before do
+      unhealthy!
+      allow(Thread).to receive(:new)
+    end
+
+    # Without a generation there is no incarnation to key a warning to, so the
+    # persisted error state is what keeps a respawn storm from repeating it.
+    it 'warns once for the error state, not once per fork respawn' do
+      3.times { start_incarnation! }
+
+      expect(warnings).to contain_exactly(
+        [:warn, '[liveness] slot 0: no container generation (cannot read /proc/1/stat (Errno::EACCES)): ' \
+                'falling back to freshness only, which cannot reject a heartbeat inherited from a previous ' \
+                'container']
+      )
+    end
+
+    it 'keeps publishing marks under the 0.1.1 freshness-only contract' do
+      healthy!
+      monitor.tick!
+
+      expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
+    end
+
+    # Nothing honest to scope the counter to, so it keeps the volume-wide scope
+    # rather than claiming one it cannot enforce.
+    it 'keeps the generation-less respawn counter' do
+      KicksLiveness::Attempts.new(heartbeat.dir).record!(0, now: Time.now.utc - 31)
+
+      start_incarnation!
+
+      expect(errors.map(&:last)).to contain_exactly(include('over 2 starts'))
+    end
+  end
+
+  describe 'a platform without procfs' do
+    let(:topology) { non_linux_topology }
+
+    it 'says nothing: the fallback is intended, not a degradation' do
+      healthy!
+      allow(Thread).to receive(:new)
+
+      start_incarnation!
+
+      expect(warnings).to be_empty
+    end
+  end
+
+  # The marks volume survives a container restart, so without scoping the
+  # counter the replacement container suppresses its own `started:` line and can
+  # escalate over starts it never took.
+  describe 'a replacement container' do
+    before do
+      unhealthy!
+      allow(Thread).to receive(:new)
+    end
+
+    def start_in(generation)
+      described_class.new(
+        slot: 0, processes: 1, consumers: 1, config: config,
+        heartbeat: KicksLiveness::Heartbeat.new(
+          dir: heartbeat.dir, max_age: 45, topology: verified_topology(generation)
+        )
+      ).start!
+    end
+
+    it 'logs its own first start rather than continuing the previous run' do
+      start_in('mnt:[1]:100')
+      logger.lines.clear
+
+      start_in('mnt:[2]:200')
+
+      expect(logger.lines.count { |_, message| message.include?('started:') }).to eq(1)
+    end
+
+    it 'never escalates over starts from the previous container' do
+      KicksLiveness::Attempts.new(heartbeat.dir, generation: 'mnt:[1]:100').record!(0, now: Time.now.utc - 31)
+
+      start_in('mnt:[2]:200')
+
+      expect(errors).to be_empty
+    end
+
+    it 'still counts the respawns of its own container' do
+      attempts.record!(0, now: Time.now.utc - 31)
+
+      start_in('mnt:[2]:200')
+
+      expect(errors.map(&:last)).to contain_exactly(include('over 2 starts'))
+    end
+  end
+
   # Defect: `expected` used to be written only at startup, so a wiped directory
   # left the probe reporting "worker has not started" for the rest of the pod's
   # life — while touch! kept bringing the slot marks back.
@@ -227,12 +405,6 @@ RSpec.describe KicksLiveness::Monitor do
   # dies after 0.2s never reached the threshold. An 82-minute outage produced
   # 1601 identical INFO lines and not one ERROR.
   describe 'a respawn storm' do
-    # Every incarnation of the monitor is a fresh object, exactly as a new fork
-    # would be.
-    def start_incarnation!
-      described_class.new(slot: 0, processes: 1, consumers: 1, config: config, heartbeat: heartbeat).start!
-    end
-
     before do
       unhealthy!
       # Stubbed rather than started and killed: a real thread may or may not
