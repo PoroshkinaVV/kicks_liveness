@@ -110,9 +110,16 @@ RSpec.describe KicksLiveness::ContainerGeneration do
   end
 
   # RUBY_PLATFORM names the host on CRuby but is "java" on JRuby wherever it
-  # runs, so the platform string alone would take the guard away from a JRuby
-  # worker in a Linux container, and take it away silently.
+  # runs (https://bugs.ruby-lang.org/issues/8090), so the platform string alone
+  # would take the guard away from a JRuby worker in a Linux container, and take
+  # it away silently. Measured on jruby 9.4: RUBY_PLATFORM "java",
+  # RbConfig::CONFIG['host_os'] "linux".
   describe 'deciding whether this is Linux at all' do
+    def on_java(host_os)
+      stub_const('RUBY_PLATFORM', 'java')
+      stub_const('RbConfig::CONFIG', RbConfig::CONFIG.merge('host_os' => host_os))
+    end
+
     it 'trusts the platform string on CRuby' do
       stub_const('RUBY_PLATFORM', 'aarch64-linux')
       stub_procfs
@@ -120,20 +127,32 @@ RSpec.describe KicksLiveness::ContainerGeneration do
       expect(described_class.current).to be_verified
     end
 
-    it 'asks procfs when the platform string cannot answer' do
-      stub_const('RUBY_PLATFORM', 'java')
+    it 'asks the host operating system when the platform string cannot answer' do
+      on_java('linux')
       stub_procfs
-      allow(File).to receive(:exist?).with('/proc/self/ns/mnt').and_return(true)
 
       expect(described_class.current).to be_verified
     end
 
+    # The whole reason the two questions are kept apart: a missing procfs may
+    # answer "no generation", and must never answer "not Linux". Silence is
+    # for a platform that was never going to have one.
+    it 'reports a Linux host whose procfs is absent as unavailable, not as another platform' do
+      on_java('linux')
+      stub_procfs(self_namespace: Errno::ENOENT, pid1_namespace: Errno::ENOENT, stat: Errno::ENOENT)
+
+      expect(described_class.current).to have_attributes(
+        state: :unavailable,
+        detail: 'cannot read /proc/self/ns/mnt (Errno::ENOENT)'
+      )
+    end
+
     it 'keeps the quiet fallback for the same runtime off Linux' do
-      stub_const('RUBY_PLATFORM', 'java')
-      allow(File).to receive(:exist?).and_call_original
-      allow(File).to receive(:exist?).with('/proc/self/ns/mnt').and_return(false)
+      on_java('darwin21')
+      allow(File).to receive(:readlink).and_call_original
 
       expect(described_class.current).to be_non_linux
+      expect(File).not_to have_received(:readlink).with(%r{\A/proc/})
     end
   end
 end

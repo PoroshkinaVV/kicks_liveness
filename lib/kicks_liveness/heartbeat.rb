@@ -118,14 +118,24 @@ module KicksLiveness
 
       private
 
-      # RUBY_PLATFORM is the cheap answer and the right one on CRuby, where it
-      # names the host. JRuby reports "java" wherever it runs, so the string
-      # alone would put a JRuby worker in a Linux container into the silent
-      # non-Linux fallback and take the guard away without saying so. The
-      # namespace link is Linux-specific, and is only looked at when the
-      # platform string cannot answer — never on the probe's ordinary path.
+      # Which operating system this is, and what procfs holds, are two
+      # questions, and only the second one may be answered by a missing file: a
+      # Linux host whose procfs is absent or masked has to reach +:unavailable+
+      # and its warning, never the silent non-Linux fallback.
+      #
+      # RUBY_PLATFORM answers the first question on CRuby, where it names the
+      # host, but JRuby reports "java" wherever it runs
+      # (https://bugs.ruby-lang.org/issues/8090). RbConfig names the host
+      # operating system on every runtime that defines it, JRuby included,
+      # where it is a constant before anything requires it. It is consulted
+      # only once the platform string has failed to answer, so the probe's
+      # +--disable-gems+ form, in which RbConfig is undefined, never needs it
+      # on Linux.
       def linux?
-        RUBY_PLATFORM.include?('linux') || (RUBY_PLATFORM == 'java' && File.exist?(SELF_NAMESPACE))
+        return true if RUBY_PLATFORM.include?('linux')
+        return false unless defined?(RbConfig)
+
+        RbConfig::CONFIG['host_os'].to_s.include?('linux')
       end
 
       # Only a comparison both sides of which were read can prove anything.
