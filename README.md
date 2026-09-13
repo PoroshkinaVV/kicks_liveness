@@ -15,8 +15,9 @@ incarnation. No application boot, no network call, and no healthy replica
 hiding a stalled one.
 
 That restart scoping needs Kubernetes' default container-private PID
-namespace. A pod that sets `shareProcessNamespace` or `hostPID` is detected and
-rejected rather than silently unscoped; see
+namespace. A pod that sets `shareProcessNamespace` or `hostPID` is rejected
+outright wherever the worker or its probe is allowed to read PID 1's namespace,
+and reported as unverifiable where neither is — never silently unscoped; see
 [Limitations](docs/LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace)
 for what each side can prove and what it does when it cannot.
 

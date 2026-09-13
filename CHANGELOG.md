@@ -19,9 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unsupported PID topology: pod must not set shareProcessNamespace or hostPID`,
   and the worker publishes `<dir>/topology-unsafe` instead of a heartbeat, so a
   probe that cannot read PID 1's link fails too. The state is terminal for the
-  marks volume; recovery is recreating the pod without those settings. Pods
-  already using either setting will fail their probes after this upgrade
-  instead of silently losing the guarantee.
+  marks volume; recovery is recreating the pod without those settings.
+
+  Read that condition before upgrading a pod that sets either. Reading PID 1's
+  namespace link is a ptrace-level operation, so it succeeds where the worker
+  or its probe shares PID 1's credentials or holds `CAP_SYS_PTRACE`, and fails
+  where it does not — a worker running as a non-root user beside a root pod
+  sandbox, for instance. Where it succeeds, such a pod stops passing its probes
+  after this upgrade instead of silently losing the guarantee. Where it fails,
+  the topology is reported as unverifiable, behavior is unchanged from 0.1.2,
+  and the worker says so once at WARN.
 - Scope the `attempt-<slot>` respawn counter to the container generation. A
   replacement container no longer inherits the previous container's unhealthy
   run: it logs its own `started:` line and cannot escalate over starts it did
