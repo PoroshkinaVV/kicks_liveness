@@ -49,14 +49,23 @@ compatibility matrix.
 
 ```bash
 bundle exec appraisal list
-bundle exec appraisal sneakers-current bundle install
+bundle exec appraisal install
+
+bundle exec appraisal kicks-current rspec
+bundle exec appraisal kicks-3-0 rspec
 bundle exec appraisal sneakers-current rspec
+bundle exec appraisal sneakers-2-11 rspec
 ```
+
+Use an individual appraisal while developing against one worker dependency
+set. Run `bundle exec rake ci` before a pull request; it executes every
+dependency set in `Appraisals` in addition to the shared style, documentation,
+and generated-gemfile checks.
 
 After changing `Appraisals`, run `bundle exec appraisal generate` and commit the
 generated `gemfiles/*.gemfile`; their lockfiles stay ignored. Your pull request
-runs the current Kicks and Sneakers appraisals on Ruby 3.1 through 4.0, both
-oldest supported versions on Ruby 3.1, and RuboCop and YARD once apiece.
+runs the current dependency appraisals on Ruby 3.1 through 4.0, every supported
+floor appraisal on Ruby 3.1, and RuboCop and YARD once apiece.
 
 ## Integration scenarios
 
@@ -72,6 +81,8 @@ spec/integration/verify.sh status    # print and verify the exact target
 spec/integration/verify.sh up        # namespace, broker, worker
 spec/integration/verify.sh probe     # runs the probe both ways, prints exit codes
 spec/integration/verify.sh marks     # lists the heartbeat files
+spec/integration/verify.sh generation-restart  # container restart, Docker only
+spec/integration/verify.sh topology  # the PID topology matrix, Docker only
 spec/integration/verify.sh logs [n]  # worker logs
 spec/integration/verify.sh ui        # port-forwards the RabbitMQ management UI
 spec/integration/verify.sh down      # deletes the namespace
