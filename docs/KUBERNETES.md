@@ -58,10 +58,12 @@ cache cannot make `startupProbe` succeed early.
 That guarantee needs the default container-private PID namespace. Do not set
 `shareProcessNamespace: true` or `hostPID: true`: in either topology PID 1
 survives a worker-container restart, so the generation repeats and an inherited
-mark would be accepted. Since 0.1.3 the gem detects that instead of accepting
-it — the probe fails with `unsupported PID topology`, permanently, until the pod
-is recreated without those settings. Where the topology cannot be verified at
-all the worker warns once and the 0.1.2 check is kept; see
+mark would be accepted. Since 0.1.3 the gem rejects that topology when either
+the worker or probe can read and compare both namespace links. With Kubernetes'
+default capability set those reads failed on the measured node: the shared-PID
+pod was `unverifiable`, and the host-PID pod was `unavailable` because node init
+reported a zero start time. Those states warn and retain the documented degraded
+checks; they do not claim the topology is safe. See
 [LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
 
 ## Why the command looks like that

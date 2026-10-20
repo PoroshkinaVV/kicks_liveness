@@ -91,8 +91,18 @@ RSpec.describe KicksLiveness::ContainerGeneration do
       expect(current).to have_attributes(state: :unavailable, detail: 'cannot parse /proc/1/stat')
     end
 
-    it 'reports a start time that is not a positive number' do
+    it 'distinguishes a zero PID 1 start time from a stat line it cannot parse' do
       stub_procfs(stat: pid1_stat('0'))
+
+      expect(current).to have_attributes(
+        state: :unavailable,
+        generation: nil,
+        detail: 'PID 1 start time is zero; possible hostPID or virtualized procfs'
+      )
+    end
+
+    it 'does not accept a negative PID 1 start time' do
+      stub_procfs(stat: pid1_stat('-1'))
 
       expect(current).to have_attributes(state: :unavailable, detail: 'cannot parse /proc/1/stat')
     end

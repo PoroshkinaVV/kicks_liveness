@@ -157,7 +157,8 @@ module KicksLiveness
       # @return [Array(String, nil), Array(nil, String)] PID 1's start time, or why it is missing
       def pid1_started_at
         started_at = start_time_field(File.read(PID1_STAT))
-        return [started_at, nil] if started_at
+        return [started_at.to_s, nil] if started_at&.positive?
+        return [nil, 'PID 1 start time is zero; possible hostPID or virtualized procfs'] if started_at&.zero?
 
         [nil, "cannot parse #{PID1_STAT}"]
       rescue StandardError => e
@@ -165,7 +166,7 @@ module KicksLiveness
       end
 
       # @param stat [String] the contents of /proc/1/stat
-      # @return [String, nil]
+      # @return [Integer, nil]
       def start_time_field(stat)
         closing_parenthesis = stat.rindex(') ')
         return unless closing_parenthesis
@@ -173,7 +174,7 @@ module KicksLiveness
         # After the command in parentheses, field 3 (`state`) is index 0. Process
         # start time is field 22, therefore index 19 in this tail.
         started_at = stat[(closing_parenthesis + 2)..].split[19]
-        started_at if started_at && Integer(started_at).positive?
+        Integer(started_at) if started_at
       rescue ArgumentError, TypeError
         nil
       end

@@ -376,9 +376,10 @@ generation-restart: topology=verified
 This scenario covers the default container-private PID namespace. With
 `shareProcessNamespace: true` or `hostPID: true`, PID 1 survives the worker
 container restart and this guarantee cannot hold — scenario 12 is that case,
-and shows it being rejected rather than accepted.
+showing both fail-closed rejection when the topology can be proved and the
+degraded outcomes when procfs access cannot prove it.
 
-### 12. A shared or host PID namespace is rejected
+### 12. Shared and host PID topology outcomes
 
 The four PID topologies, in one command. It needs the fixture image but neither
 Kubernetes nor RabbitMQ, because everything here turns on which PID namespace
@@ -412,6 +413,22 @@ unverifiable own heartbeat: exit=0 1 process(es) healthy
 
 Four cases, and each line is the point of one of them.
 
+A separate run on a real Kubernetes v1.25.0 node on Docker Desktop used
+containerd, no `securityContext`, a root worker and the default capability set.
+It produced a different and operationally important table:
+
+| pod topology | PID 1 | PID 1 UID | `/proc/1/ns/mnt` | start time | 0.1.3 state |
+|---|---|---:|---|---:|---|
+| `hostPID: true` | node init | 0 | denied | 0 | `unavailable` |
+| `shareProcessNamespace: true` | pod sandbox | 65535 | denied | 19031096 | `unverifiable` |
+| private PID | container process | 0 | readable | 19031243 | `verified` |
+| shared PID plus `CAP_SYS_PTRACE` | pod sandbox | 65535 | readable | — | `unsafe` |
+
+The Docker matrix proves the fail-closed branch by granting the access it needs;
+the Kubernetes measurement shows that this is not the default result for either
+unsupported setting. The degraded states still warn, but they retain the weaker
+generation or freshness-only guarantees described in LIMITATIONS.md.
+
 **`shared-pid`** joins another container's PID namespace, which is what
 Kubernetes `shareProcessNamespace: true` does — there PID 1 is the pod sandbox.
 **`host-pid`** uses the node's PID namespace, which is `hostPID: true`. In both,
@@ -426,9 +443,12 @@ the inherited files rather than a heartbeat of its own.
 
 Reading PID 1's namespace link is a ptrace-level operation, so the `host-pid`
 case runs with `CAP_SYS_PTRACE`; without it the link is unreadable and the
-outcome is the weaker `unverifiable` state instead — which is the fourth case
-below, and the honest limit of what a container can prove about a topology it is
-not allowed to inspect.
+outcome depends on whether a generation can still be derived. Node init on the
+measured Kubernetes node reported start time zero, so that pod was
+`unavailable`. A readable positive start time would instead leave the topology
+`unverifiable`. The fourth case below constructs that latter branch explicitly;
+both are honest limits on what a container can prove about a topology it is not
+allowed to inspect.
 
 **`private-pid`** is the fully verified positive control: an ordinary container,
 owning PID 1, probe green.

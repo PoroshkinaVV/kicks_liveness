@@ -15,9 +15,12 @@ incarnation. No application boot, no network call, and no healthy replica
 hiding a stalled one.
 
 That restart scoping needs Kubernetes' default container-private PID
-namespace. A pod that sets `shareProcessNamespace` or `hostPID` is rejected
-outright wherever the worker or its probe is allowed to read PID 1's namespace,
-and reported as unverifiable where neither is — never silently unscoped; see
+namespace. Where the namespace links are readable, a pod that sets
+`shareProcessNamespace` or `hostPID` is rejected outright. With the default
+capability set they were not readable on the measured Kubernetes node: the
+shared-PID pod was `unverifiable`, while the host-PID pod had no usable
+generation because node init reported a zero start time. Both degradations warn
+instead of pretending the restart guarantee still holds; see
 [Limitations](docs/LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace)
 for what each side can prove and what it does when it cannot.
 
@@ -197,7 +200,7 @@ negative path before rollout; the commands and expected output are in
 | [Design](docs/DESIGN.md) | health predicate, heartbeat files, hooks, configuration choices, and measurements |
 | [Running under Kubernetes](docs/KUBERNETES.md) | full manifest, CPU/startup budgets, alerts, and live-pod verification |
 | [Limitations](docs/LIMITATIONS.md) | cases the in-memory predicate intentionally cannot cover |
-| [Verification scenarios](docs/VERIFYING.md) | eleven deliberately induced failures and their observed outcomes |
+| [Verification scenarios](docs/VERIFYING.md) | twelve deliberately exercised scenarios and their observed outcomes |
 
 ## Contributing
 

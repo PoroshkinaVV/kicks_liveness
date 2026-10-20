@@ -408,8 +408,10 @@ cmd_topology() {
   topology_unsafe_case shared-pid --pid "container:$sandbox"
   # Kubernetes hostPID: true — PID 1 is the node's init process. Reading its
   # namespace link is a ptrace-level operation, and a container without
-  # CAP_SYS_PTRACE is normally refused; where it is refused the outcome is the
-  # weaker "unverifiable" the case below covers.
+  # CAP_SYS_PTRACE is normally refused. Without the comparison the outcome is
+  # degraded: `unavailable` when node init reports start time zero, as measured
+  # on the Kubernetes fixture, or `unverifiable` where a generation can still
+  # be derived.
   topology_unsafe_case host-pid --pid host --cap-add SYS_PTRACE
   topology_private_case
   topology_unverifiable_case

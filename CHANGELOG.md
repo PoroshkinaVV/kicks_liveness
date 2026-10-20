@@ -21,14 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   probe that cannot read PID 1's link fails too. The state is terminal for the
   marks volume; recovery is recreating the pod without those settings.
 
-  Read that condition before upgrading a pod that sets either. Reading PID 1's
-  namespace link is a ptrace-level operation, so it succeeds where the worker
-  or its probe shares PID 1's credentials or holds `CAP_SYS_PTRACE`, and fails
-  where it does not — a worker running as a non-root user beside a root pod
-  sandbox, for instance. Where it succeeds, such a pod stops passing its probes
-  after this upgrade instead of silently losing the guarantee. Where it fails,
-  the topology is reported as unverifiable, behavior is unchanged from 0.1.2,
-  and the worker says so once at WARN.
+  Read that condition before upgrading a pod that sets either: rejection is not
+  unconditional. Reading PID 1's namespace link is a ptrace-level operation.
+  On a measured Kubernetes node, with no `securityContext`, a root worker and
+  the default capability set, the link was denied in both unsupported
+  topologies. `shareProcessNamespace` became `unverifiable`; `hostPID` became
+  `unavailable` because node init's otherwise valid stat reported start time
+  zero. Adding `CAP_SYS_PTRACE` made the shared-PID topology provably unsafe.
+  Where the comparison cannot be made, the previous generation or
+  freshness-only behavior remains and the worker says so once at WARN.
+- Distinguish a valid zero in PID 1's stat start-time field from a stat line that
+  cannot be parsed. It leaves the generation unavailable and warns that
+  `hostPID` or virtualized procfs is possible instead of reporting the false
+  reason `cannot parse /proc/1/stat`. Treating zero as proof of `hostPID` remains
+  deliberately out of scope until virtualized procfs implementations are
+  measured.
 - Scope the `attempt-<slot>` respawn counter to the container generation. A
   replacement container no longer inherits the previous container's unhealthy
   run: it logs its own `started:` line and cannot escalate over starts it did

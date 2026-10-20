@@ -140,15 +140,28 @@ inode does not rescue it, because procfs hands out the lowest free inode and a
 quiet restart normally gets back the one it just released. Both halves repeat,
 so under the 0.1.2 rule an inherited fresh mark satisfied the startup probe.
 Watched, computing that rule by hand after a container restart, in
-[VERIFYING.md](VERIFYING.md#12-a-shared-or-host-pid-namespace-is-rejected):
+[VERIFYING.md](VERIFYING.md#12-shared-and-host-pid-topology-outcomes):
 
 ```
 shared-pid: 0.1.2 generation before=mnt:[4026532693]:17207878 after=mnt:[4026532693]:17207878
 host-pid:   0.1.2 generation before=mnt:[4026532699]:105      after=mnt:[4026532699]:105
 ```
 
-Since 0.1.3 that is detected rather than merely documented. Each side compares
-`/proc/1/ns/mnt` with `/proc/self/ns/mnt`, and what it can prove decides what
+The practical 0.1.3 outcome depends on access to PID 1. Measured on a real
+Kubernetes v1.25.0 node on Docker Desktop, using containerd, with no
+`securityContext`, a root worker and the default capability set:
+
+| pod topology | PID 1 | PID 1 UID | `/proc/1/ns/mnt` | start time | result |
+|---|---|---:|---|---:|---|
+| `hostPID: true` | node init | 0 | denied | 0 | `unavailable` |
+| `shareProcessNamespace: true` | pod sandbox | 65535 | denied | 19031096 | `unverifiable` |
+| private PID | container process | 0 | readable | 19031243 | `verified` |
+| shared PID plus `CAP_SYS_PTRACE` | pod sandbox | 65535 | readable | — | `unsafe` |
+
+The default capability set therefore did not prove either unsupported topology
+unsafe on that node. This is not a recommendation to add `CAP_SYS_PTRACE`: it is
+the measured condition under which the namespace comparison became possible.
+Each side attempts that comparison, and what it can actually prove decides what
 happens.
 
 ### Proven unsafe: the probe fails, and keeps failing
@@ -184,6 +197,12 @@ container fails its probes and restarts, which is the honest outcome: the
 alternative is a pod that looks healthy while nothing guarantees the heartbeat
 belongs to the process that is running.
 
+This is the fail-closed branch, not the default outcome promised for every
+cluster. A normal capability set does not include `CAP_SYS_PTRACE`, and a pod
+sandbox or node process may have credentials that make its namespace link
+unreadable to the worker and exec probe. Those cases take one of the degraded
+branches below instead of guessing.
+
 ### Unverifiable: the 0.1.2 guarantee, and one warning
 
 Reading another process's namespace link is a ptrace-level operation, so
@@ -206,6 +225,11 @@ is the state it lands in whenever the link cannot be read, and the 0.1.2
 weakness above is then still present. It is warned about once per container
 incarnation, not once per fork, because a respawn loop would otherwise turn one
 lost guarantee into thousands of identical lines.
+
+This was the measured default for `shareProcessNamespace: true`: the pod sandbox
+ran as UID 65535, the worker as root without `CAP_SYS_PTRACE`, and both worker and
+probe were denied access to the sandbox's namespace link. Adding the capability
+made the difference visible and moved the same topology to `unsafe`.
 
 There is a narrower startup window when the worker and probe have asymmetric
 access: the worker can prove the topology unsafe, but the probe cannot. Before
@@ -235,6 +259,20 @@ WARN [liveness] slot 0: no container generation (cannot read /proc/1/stat (Errno
 falling back to freshness only, which cannot reject a heartbeat inherited from a previous
 container
 ```
+
+A parsed start time of zero has its own diagnostic:
+
+```
+WARN [liveness] slot 0: no container generation (PID 1 start time is zero; possible hostPID or virtualized procfs):
+falling back to freshness only, which cannot reject a heartbeat inherited from a previous
+container
+```
+
+Linux defines the field as clock ticks after system boot, so zero is a valid
+value rather than a malformed stat line. It was the measured value for node init
+in a `hostPID: true` pod, but 0.1.3 does not treat it as proof: a runtime with a
+virtualized procfs may expose the same value for a legitimate container PID 1.
+The state remains `unavailable` until those runtimes have been measured.
 
 Off Linux there is no procfs to read, and the same fallback applies **silently**:
 that is an intentional compatibility mode — the gem outside a Linux container —
