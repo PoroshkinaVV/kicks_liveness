@@ -142,32 +142,20 @@ container declares itself and every current fork publishes its own mark, files
 inherited from the previous container are rejected. Nothing outside the marks
 directory is removed.
 
-**`topology-unsafe` is the fail-closed half of that.** The identifier is an
-incarnation only where the container owns PID 1, which is not true under
-`shareProcessNamespace: true` or `hostPID: true` — there PID 1 outlives the
-worker container and the generation repeats. Each side compares
-`/proc/1/ns/mnt` with `/proc/self/ns/mnt` to find out, and the two sides can
-legitimately differ, because procfs access is local to a process and their
-credentials need not match.
+**`topology-unsafe` carries terminal evidence from the worker.** Each participant
+compares `/proc/1/ns/mnt` with `/proc/self/ns/mnt` independently. A worker that
+proves them different writes this file instead of a heartbeat; the probe checks
+it before `expected`, generation, or freshness. Omitting a new generation would
+leave inherited marks eligible for acceptance. Weaker evidence never clears
+this file.
 
-So the verdict is shared rather than owned. A worker that can prove the topology
-unsafe writes this file instead of a heartbeat, and every probe reads it before
-anything else — before `expected`, before its own procfs, before freshness. Not
-writing a new `generation` would not be enough: an inherited one may still be in
-the volume. Proof from either side wins, nothing weaker clears it, and the state
-is terminal — neither setting can be changed on a live pod, and the `emptyDir`
-dies with the pod.
-
-Where a side cannot read PID 1's link it has proven nothing, so the 0.1.2 check
-is kept and the worker reports it once; `topology-report` is what makes "once"
-survive a fork respawn, and it is the only file here the probe ignores. It is
-claimed under an exclusive lock rather than written through a rename, because
-the runner starts every fork at once and a rename only protects a reader from a
-partial file — it does not stop each fork reading the same stale key and all of
-them claiming the same line. The unsupported-topology ERROR is claimed the same
-way, for the same reason. Both degraded states, and why neither reaches the
-probe's stdout, are in
-[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
+**`topology-report` deduplicates worker diagnostics across forks.** It is the
+only file here the probe ignores. Claiming a report locks the file around the
+read-compare-write operation; atomic rename alone cannot prevent concurrent
+claims. The file is cleared by truncation so every fork keeps locking the same
+inode. See
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace)
+for the conditions for rejection, degraded states, and operator recovery.
 
 **Files are named by supervisor slot, not by PID.** A fork killed with SIGKILL
 is respawned into the same slot and overwrites its own file. Had the name

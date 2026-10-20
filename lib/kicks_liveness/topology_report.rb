@@ -1,20 +1,10 @@
 require 'fileutils'
 
 module KicksLiveness
-  # The worker's one-time report of what it could prove about the PID topology,
-  # and the flag that keeps it to a single line.
+  # Claims worker topology reports across fork respawns. Kept outside
+  # {Heartbeat} because the probe does not report these diagnostics.
   #
-  # Deliberately outside {Heartbeat}, for the reason {Attempts} is: the probe
-  # loads that one file and nothing the probe does not need belongs in it. And
-  # deliberately not on the probe's stdout either — an exec probe's output
-  # reaches a human only through the kubelet's Unhealthy event, so a diagnostic
-  # appended there would repeat on every invocation and sit beside reasons it
-  # has nothing to do with. The worker's log is where this belongs.
-  #
-  # The flag lives in the marks directory because that is the only state a fork
-  # respawn cannot destroy, and one lost guarantee must not become thousands of
-  # identical lines.
-  #
+  # @see file:docs/LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace
   # @api private
   class TopologyReport
     # @param dir [String] marks directory
@@ -26,14 +16,9 @@ module KicksLiveness
 
     # Claims the right to report this state, once.
     #
-    # The key carries the generation where there is one, so each container
-    # incarnation reports once. Without a generation there is no honest
-    # incarnation boundary to key that promise to, so the key is the state
-    # itself and holds for as long as it lasts. That is also true of a proven
-    # unsupported topology: there the incarnation is by definition not
-    # trustworthy, which is the whole finding. A verified generation clears the
-    # flag, so the next degradation is reported rather than swallowed by a stale
-    # one.
+    # Unverifiable results use a generation key; unavailable and unsafe results
+    # have no trustworthy generation and use only their state. Verification
+    # clears the flag so a later degradation can be reported again.
     #
     # @return [Array(Symbol, String), nil] the level and the line to log, or nil
     #   when there is nothing new to say
@@ -64,9 +49,7 @@ module KicksLiveness
       end
     end
 
-    # ERROR for the one state that is a verdict rather than a degradation: the
-    # probe fails on it, and no pod recovers from it without being recreated.
-    # The other two keep their guarantees and only lose an assurance about them.
+    # Only unsafe changes the probe verdict and is reported at ERROR.
     def report_for(topology)
       case topology.state
       when :unsafe

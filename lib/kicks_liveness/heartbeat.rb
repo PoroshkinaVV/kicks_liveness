@@ -1,12 +1,6 @@
 module KicksLiveness
-  # What a process can prove, from Linux procfs, about the container incarnation
-  # it runs in — and about the PID topology that identification depends on.
-  #
-  # The worker and its exec probes each answer this for themselves, and the two
-  # may legitimately differ: procfs access is per-process and their credentials
-  # need not match. The answer is therefore a result carrying a state rather
-  # than a string or +nil+, so that "proven unsafe", "could not be verified",
-  # "could not be derived at all" and "not Linux, by design" stay distinct.
+  # Identifies the container generation and PID topology from Linux procfs,
+  # independently in the worker and each exec probe.
   #
   # @see file:docs/LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace
   # @api private
@@ -20,22 +14,11 @@ module KicksLiveness
 
     # One procfs inspection, as a value.
     #
-    # Five states, because collapsing any two of them loses information that
-    # decides behaviour:
-    #
-    # +:verified+:: PID 1 shares this process's mount namespace, so the
-    #   container owns it and the generation identifies this incarnation.
-    # +:unsafe+:: PID 1 is in another mount namespace. That is
-    #   <tt>shareProcessNamespace: true</tt> or <tt>hostPID: true</tt>: PID 1
-    #   outlives a restart of the worker container, so no generation derived
-    #   from it can be trusted. Proof, not suspicion — it fails closed.
-    # +:unverifiable+:: the generation was derived, but PID 1's mount namespace
-    #   could not be read, so the topology behind it is unknown. The 0.1.2
-    #   guard is kept and the worker warns once.
-    # +:unavailable+:: Linux, but procfs yielded no generation at all. Only the
-    #   0.1.1 freshness check remains, and the worker warns once.
-    # +:non_linux+:: not Linux. An intentional compatibility mode rather than a
-    #   degradation, so it is silent.
+    # +:verified+:: matching mount namespaces, with a generation.
+    # +:unsafe+:: different mount namespaces; no trustworthy generation.
+    # +:unverifiable+:: a generation, but PID 1's namespace could not be read.
+    # +:unavailable+:: Linux procfs yielded no generation.
+    # +:non_linux+:: another operating system.
     #
     # @api private
     class Result
@@ -83,15 +66,6 @@ module KicksLiveness
 
       # @return [Boolean]
       def unsafe? = @state == :unsafe
-
-      # @return [Boolean]
-      def unverifiable? = @state == :unverifiable
-
-      # @return [Boolean]
-      def unavailable? = @state == :unavailable
-
-      # @return [Boolean]
-      def non_linux? = @state == :non_linux
     end
 
     class << self
@@ -118,19 +92,10 @@ module KicksLiveness
 
       private
 
-      # Which operating system this is, and what procfs holds, are two
-      # questions, and only the second one may be answered by a missing file: a
-      # Linux host whose procfs is absent or masked has to reach +:unavailable+
-      # and its warning, never the silent non-Linux fallback.
-      #
-      # RUBY_PLATFORM answers the first question on CRuby, where it names the
-      # host, but JRuby reports "java" wherever it runs
-      # (https://bugs.ruby-lang.org/issues/8090). RbConfig names the host
-      # operating system on every runtime that defines it, JRuby included,
-      # where it is a constant before anything requires it. It is consulted
-      # only once the platform string has failed to answer, so the probe's
-      # +--disable-gems+ form, in which RbConfig is undefined, never needs it
-      # on Linux.
+      # Missing procfs does not identify the OS. JRuby reports "java", so use
+      # its predefined RbConfig to identify the host. CRuby on Linux answers
+      # first, including under --disable-gems where RbConfig may be undefined.
+      # https://bugs.ruby-lang.org/issues/8090
       def linux?
         return true if RUBY_PLATFORM.include?('linux')
         return false unless defined?(RbConfig)
@@ -204,9 +169,7 @@ module KicksLiveness
     # @return [Integer] seconds after which a mark is stale, by default
     DEFAULT_MAX_AGE = 45
 
-    # The probe's verdict for a PID topology in which the heartbeat cannot be
-    # scoped to this container at all. One string, whoever proved it: the probe
-    # from its own procfs, or the worker through the state it published.
+    # Shared verdict for unsafe topology evidence from either participant.
     # @return [String]
     UNSUPPORTED_TOPOLOGY = 'unsupported PID topology: pod must not set shareProcessNamespace or hostPID'.freeze
 
@@ -217,9 +180,7 @@ module KicksLiveness
       tick: 'KICKS_LIVENESS_TICK'
     }.freeze
 
-    # Linux exposes a stable identifier shared by a private-PID container and
-    # its exec probes. A restarted container gets a new identifier even though
-    # its Kubernetes emptyDir survives.
+    # Inspects this process's container generation and PID topology.
     # @return [ContainerGeneration::Result] what this process can prove about
     #   its own incarnation
     # @api private
@@ -337,13 +298,9 @@ module KicksLiveness
     # Publishes the terminal fail-closed state for a proven unsafe topology,
     # instead of any mark.
     #
-    # Omitting the marks would not be enough on its own: a generation file and a
-    # fresh slot mark inherited from a previous container may still be lying in
-    # the volume, and this container cannot tell them apart from its own. So the
-    # state is published rather than implied, it is published before any normal
-    # write could race it, and nothing ever removes it — the two settings that
-    # cause it cannot be changed on a live pod, and the emptyDir dies with that
-    # pod.
+    # Explicit evidence is needed because inherited generation and slot marks
+    # may still be fresh. It precedes normal writes and is never removed during
+    # the marks volume's lifetime.
     #
     # @return [Integer, nil] bytes written, or nil when this process has not
     #   proven the topology unsafe and so has nothing to publish
@@ -360,10 +317,8 @@ module KicksLiveness
     # The returned message names slots the way the files are named, so that a
     # human reading the Unhealthy event knows which file to look at.
     #
-    # Proof of an unsupported topology comes first, from either participant and
-    # before anything is read from the marks: the worker's published state, then
-    # this process's own procfs. Neither an inherited mark nor a weaker local
-    # result can talk the probe out of it.
+    # Published or local unsafe evidence takes precedence over every generation
+    # and freshness check, including when this probe cannot verify the topology.
     #
     # @param now [Time] injected in specs
     # @return [Array(Boolean, String)] health, and the reason to print on stdout

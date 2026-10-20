@@ -36,11 +36,6 @@ module KicksLiveness
         @mutex.synchronize { @workers.delete(worker) }
       end
 
-      # @return [Integer] how many workers are currently registered
-      def size
-        @mutex.synchronize { @workers.size }
-      end
-
       # Records that this process is shutting down on purpose.
       #
       # Without it a graceful shutdown is indistinguishable from a failure: the

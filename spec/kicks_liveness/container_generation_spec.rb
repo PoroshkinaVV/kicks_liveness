@@ -161,7 +161,7 @@ RSpec.describe KicksLiveness::ContainerGeneration do
       on_java('darwin21')
       allow(File).to receive(:readlink).and_call_original
 
-      expect(described_class.current).to be_non_linux
+      expect(described_class.current).to have_attributes(state: :non_linux)
       expect(File).not_to have_received(:readlink).with(%r{\A/proc/})
     end
   end

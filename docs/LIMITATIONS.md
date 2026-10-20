@@ -134,35 +134,17 @@ mount namespace plus PID 1 start time. No application cache is removed.
 
 That is an incarnation only where the container owns PID 1. With
 `shareProcessNamespace: true` PID 1 is the pod sandbox; with `hostPID: true` it
-is the node's init process. Neither restarts when the worker container does, so
-the start-time half of the identifier stays constant — and the mount namespace
-inode does not rescue it, because procfs hands out the lowest free inode and a
-quiet restart normally gets back the one it just released. Both halves repeat,
-so under the 0.1.2 rule an inherited fresh mark satisfied the startup probe.
-Watched, computing that rule by hand after a container restart, in
-[VERIFYING.md](VERIFYING.md#12-shared-and-host-pid-topology-outcomes):
+is the node's init process. Neither restarts when the worker container does.
+If the replacement container also receives the same mount namespace inode,
+the complete identifier repeats and an inherited fresh mark can satisfy the
+0.1.2 startup probe.
 
-```
-shared-pid: 0.1.2 generation before=mnt:[4026532693]:17207878 after=mnt:[4026532693]:17207878
-host-pid:   0.1.2 generation before=mnt:[4026532699]:105      after=mnt:[4026532699]:105
-```
-
-The practical 0.1.3 outcome depends on access to PID 1. Measured on a real
-Kubernetes v1.25.0 node on Docker Desktop, using containerd, with no
-`securityContext`, a root worker and the default capability set:
-
-| pod topology | PID 1 | PID 1 UID | `/proc/1/ns/mnt` | start time | result |
-|---|---|---:|---|---:|---|
-| `hostPID: true` | node init | 0 | denied | 0 | `unavailable` |
-| `shareProcessNamespace: true` | pod sandbox | 65535 | denied | 19031096 | `unverifiable` |
-| private PID | container process | 0 | readable | 19031243 | `verified` |
-| shared PID plus `CAP_SYS_PTRACE` | pod sandbox | 65535 | readable | — | `unsafe` |
-
-The default capability set therefore did not prove either unsupported topology
-unsafe on that node. This is not a recommendation to add `CAP_SYS_PTRACE`: it is
-the measured condition under which the namespace comparison became possible.
-Each side attempts that comparison, and what it can actually prove decides what
-happens.
+Rejection in 0.1.3 depends on procfs access. On the measured Kubernetes node,
+default capabilities left shared PID `unverifiable` and host PID `unavailable`;
+node init reported start time zero. Adding `CAP_SYS_PTRACE` made shared PID
+provably `unsafe`. This is not a recommendation to add the capability.
+The full restart reproduction and Kubernetes measurement are in
+[VERIFYING.md](VERIFYING.md#12-shared-and-host-pid-topology-outcomes).
 
 ### Proven unsafe: the probe fails, and keeps failing
 

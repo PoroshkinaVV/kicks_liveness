@@ -66,13 +66,7 @@ module KicksLiveness
 
     private
 
-    # A proven shared or host PID namespace is not a degradation to work
-    # around: in it PID 1 belongs to the pod sandbox or the node and survives a
-    # restart of this container, so no mark in this volume can be attributed to
-    # an incarnation at all. The worker therefore publishes the fail-closed
-    # state and nothing else — no generation, no slot mark, no respawn counter
-    # — and leaves the verdict to the probe. Recovery is recreating the pod:
-    # neither setting can be changed on a live one.
+    # Publish unsafe evidence without recording a start or launching the loop.
     def reject_topology!
       # Reported before the state is published: a marks directory that cannot be
       # written to is exactly the case where the log line is all the operator
@@ -82,14 +76,7 @@ module KicksLiveness
       nil
     end
 
-    # Reported from the worker, never from the probe: the probe's stdout is read
-    # by a human only through an Unhealthy event, where a repeated diagnostic
-    # beside an unrelated reason is worse than useless.
-    #
-    # Deduplicated through the marks directory for the same reason the respawn
-    # counter is: a fork that cannot subscribe comes back every few hundred
-    # milliseconds, and a topology it cannot change would otherwise be reported
-    # on every one of those starts.
+    # Claim before logging so simultaneous forks cannot report the same state.
     def report_topology
       level, message = TopologyReport.new(@heartbeat.dir, @heartbeat.topology).claim!
 
