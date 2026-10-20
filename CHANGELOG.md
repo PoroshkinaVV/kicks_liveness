@@ -5,6 +5,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound the graceful-shutdown heartbeat exemption. The first stop notification
+  starts a monotonic deadline; repeated callbacks cannot extend it. Once it
+  expires, the monitor logs one ERROR and stops refreshing its slot mark while
+  continuing to declare the expected fork count. A stuck drain can then fail
+  the ordinary freshness check instead of remaining healthy indefinitely.
+  The monitor does not terminate the process.
+
+### Added
+
+- Add `shutdown_grace` and `KICKS_LIVENESS_SHUTDOWN_GRACE`, defaulting to 60
+  seconds. The initializer overrides the environment. Set it to at least your
+  deployment's `terminationGracePeriodSeconds` to preserve the whole drain
+  budget. Expiry stops writes; probe failure still waits for `max_age` and
+  restart still depends on the kubelet's probe schedule and failure threshold.
+
 ## [0.1.3] - 2026-10-21
 
 ### Fixed

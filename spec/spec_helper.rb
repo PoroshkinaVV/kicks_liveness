@@ -10,11 +10,11 @@ RSpec.configure do |config|
   config.order = :random
 
   # The registry and the configuration are module state, and have to be reset
-  # between examples. @stopping especially: leaking it would make the monitor
+  # between examples. @stopping_at especially: leaking it would make the monitor
   # skip its health predicate and let other examples pass for the wrong reason.
   config.before do
     KicksLiveness::Registry.instance_variable_set(:@workers, [])
-    KicksLiveness::Registry.instance_variable_set(:@stopping, false)
+    KicksLiveness::Registry.instance_variable_set(:@stopping_at, nil)
     KicksLiveness.instance_variable_set(:@config, nil)
   end
 end

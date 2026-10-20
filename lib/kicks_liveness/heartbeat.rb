@@ -168,7 +168,8 @@ module KicksLiveness
     ENV_NAMES = {
       dir: 'KICKS_LIVENESS_DIR',
       max_age: 'KICKS_LIVENESS_MAX_AGE',
-      tick: 'KICKS_LIVENESS_TICK'
+      tick: 'KICKS_LIVENESS_TICK',
+      shutdown_grace: 'KICKS_LIVENESS_SHUTDOWN_GRACE'
     }.freeze
 
     # Inspects this process's container generation and PID topology.

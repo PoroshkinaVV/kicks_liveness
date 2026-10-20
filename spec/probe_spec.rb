@@ -56,6 +56,28 @@ RSpec.describe 'liveness probe' do
     expect(code).to eq(0)
   end
 
+  describe 'an expired shutdown grace' do
+    let(:heartbeat) { healthy_marks! }
+    let(:monitor) do
+      KicksLiveness::Monitor.new(slot: 0, processes: 1, consumers: 1, config: KicksLiveness.config, heartbeat: heartbeat)
+    end
+
+    it 'leaves the probe green until the last mark becomes stale, then exits one' do
+      allow(Process).to receive(:clock_gettime).and_call_original
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(100.0, 160.0)
+      KicksLiveness::Registry.stopping!
+
+      expect(monitor.tick!).to be(false)
+      expect(run_probe).to eq(['1 process(es) healthy', 0])
+      stale = Time.now - 46
+      File.utime(stale, stale, File.join(dir, 'worker-0'))
+      expect(monitor.tick!).to be(false)
+      message, code = run_probe
+      expect(code).to eq(1)
+      expect(message).to match(/\Aworker-0 stale \d+s > 45s\z/)
+    end
+  end
+
   # The packaged entry point, against the production generation rather than an
   # injected one: only a process that derives its own can reject an inherited
   # heartbeat, so Darwin cannot take part and a Linux host whose procfs yields

@@ -45,10 +45,7 @@ module KicksLiveness
       # cannot recover a probe whose expected count is missing.
       @heartbeat.declare!(@processes)
 
-      if Registry.stopping?
-        shutdown_tick!
-        return true
-      end
+      return shutdown_tick! if Registry.stopping?
 
       healthy = Registry.healthy?(@consumers)
       if healthy
@@ -111,12 +108,24 @@ module KicksLiveness
       @unhealthy_ticks ||= 0
     end
 
-    # Deliberate drain suspends the predicate for the rest of the process.
-    # An external deadline must bound it; the monitor does not own that deadline.
-    # @see file:docs/LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline
-    def shutdown_tick!
-      @heartbeat.touch!(@slot)
+    # The first stop callback, not a delayed tick, starts the monotonic deadline.
+    # Expiry stops refreshes; ordinary mark staleness then fails the probe.
+    # @see file:docs/LIMITATIONS.md#graceful-shutdown-has-a-finite-heartbeat-exemption
+    def shutdown_tick! # rubocop:disable Naming/PredicateMethod -- Publishes the heartbeat and records transitions.
+      @shutdown_deadline ||= Registry.stopping_at + @config.shutdown_grace
+      report_shutdown_once
 
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= @shutdown_deadline
+        log(:error, 'shutdown grace expired: heartbeat is no longer refreshed') unless @shutdown_expired
+        @shutdown_expired = true
+        return false
+      end
+
+      @heartbeat.touch!(@slot)
+      true
+    end
+
+    def report_shutdown_once
       return if @shutdown_reported
 
       log(:info, 'shutting down: consumers are no longer checked')

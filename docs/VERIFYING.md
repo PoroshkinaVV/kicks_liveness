@@ -211,6 +211,30 @@ quickly — the monitor never gets to run again, so
 `shutting down: consumers are no longer checked` may not appear at all. The
 absence of ERROR is the observable, not the presence of that line.
 
+The shutdown exemption is now bounded by `shutdown_grace` (60 seconds by
+default). Keep `KICKS_LIVENESS_SHUTDOWN_GRACE` at least as long as the fixture's
+`terminationGracePeriodSeconds`. An out-of-band SIGTERM does not start a kubelet
+termination deadline: if the process remains stuck draining, the expected
+monitor diagnostic after its grace is:
+
+```
+[liveness] slot 0: shutdown grace expired: heartbeat is no longer refreshed
+```
+
+The probe can still pass until the last mark exceeds `max_age`; afterwards it
+must exit 1 with `worker-0 stale ...`, and the monitor must not refresh that
+mark on later ticks. The deadline, repeated callbacks, wall-clock changes, and
+a sibling fork's independent lifetime are covered without Kubernetes by:
+
+```bash
+bundle exec rspec spec/kicks_liveness/configuration_spec.rb \
+  spec/kicks_liveness/monitor_spec.rb spec/probe_spec.rb
+```
+
+The probe spec launches a separate Ruby process against the monitor's marks.
+These checks exercise the local contract; a real stuck drain and an ordinary
+rollout still need verification against the cluster's worker and broker.
+
 ### 7. Bad broker credentials
 
 Point `AMQP_URL` at a wrong password. The fork cannot subscribe, so the
