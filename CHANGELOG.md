@@ -11,57 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Detect and reject PID topologies in which the container generation cannot
   identify an incarnation. `shareProcessNamespace: true` and `hostPID: true`
-  leave PID 1 alive across a restart of the worker container, and the mount
-  namespace inode is normally handed straight back to the replacement, so the
-  0.1.2 identifier repeats and an inherited fresh heartbeat could satisfy
-  `startupProbe`. Where the namespace links can be read, both settings are now
-  proven unsafe: the probe exits 1 with
+  leave PID 1 alive across a restart of the worker container, so the 0.1.2
+  identifier can repeat and an inherited fresh heartbeat could satisfy
+  `startupProbe`. Rejection is conditional on a readable `/proc/1/ns/mnt`.
+  Where the comparison can be made, the worker publishes `<dir>/topology-unsafe`
+  instead of a heartbeat and every probe exits 1 with
   `unsupported PID topology: pod must not set shareProcessNamespace or hostPID`,
-  and the worker publishes `<dir>/topology-unsafe` instead of a heartbeat, so a
-  probe that cannot read PID 1's link fails too. The state is terminal for the
-  marks volume; recovery is recreating the pod without those settings.
-
-  Read that condition before upgrading a pod that sets either: rejection is not
-  unconditional. Reading PID 1's namespace link is a ptrace-level operation.
-  On a measured Kubernetes node, with no `securityContext`, a root worker and
-  the default capability set, the link was denied in both unsupported
-  topologies. `shareProcessNamespace` became `unverifiable`; `hostPID` became
-  `unavailable` because node init's otherwise valid stat reported start time
-  zero. Adding `CAP_SYS_PTRACE` made the shared-PID topology provably unsafe.
-  Where the comparison cannot be made, the previous generation or
-  freshness-only behavior remains and the worker says so once at WARN.
-- Distinguish a valid zero in PID 1's stat start-time field from a stat line that
-  cannot be parsed. It leaves the generation unavailable and warns that
-  `hostPID` or virtualized procfs is possible instead of reporting the false
-  reason `cannot parse /proc/1/stat`. Treating zero as proof of `hostPID` remains
-  deliberately out of scope until virtualized procfs implementations are
-  measured.
+  including one that cannot read the link itself; the state is terminal for the
+  marks volume, and recovery is recreating the pod without those settings.
+  Where it cannot, the previous behavior remains and the worker warns once. The
+  measured outcomes are in `docs/LIMITATIONS.md`.
+- Distinguish a valid zero in PID 1's stat start-time field from a stat line
+  that cannot be parsed: the generation stays unavailable, and the warning
+  names `hostPID` or a virtualized procfs instead of a false parse error.
 - Scope the `attempt-<slot>` respawn counter to the container generation. A
-  replacement container no longer inherits the previous container's unhealthy
-  run: it logs its own `started:` line and cannot escalate over starts it did
-  not take. Where no generation is available the counter keeps its previous
+  replacement container starts its own unhealthy run and cannot escalate over
+  starts it did not take, while respawns within one generation go on sharing a
+  count. Where no generation is available the counter keeps its previous
   volume-wide behavior.
 
 ### Added
 
-- Report a degraded container generation once from the worker, at WARN. An
-  unreadable `/proc/1/ns/mnt` is treated as an unverifiable topology rather
-  than as proof of an unsafe one: the 0.1.2 generation check and the probe's
-  own output are unchanged, and the warning is emitted once per container
-  incarnation. A generation that cannot be derived at all on Linux retains the
-  0.1.1 freshness-only fallback and warns once for as long as that state lasts.
-  Neither state adds anything to the probe's stdout, and the intentional
-  non-Linux fallback stays silent.
+- Report a degraded container generation once from the worker, at WARN — once
+  per container incarnation where a generation exists, once per error state
+  where it does not. Neither degraded state adds anything to the probe's
+  output, and the intentional non-Linux fallback stays silent.
 - The marks directory gains two files that appear only when something is
   wrong: `topology-unsafe`, the terminal fail-closed state, and
   `topology-report`, the worker's own flag for saying each thing once. Tooling
   that enumerates the directory should allow for both.
-- Document the boundary of the graceful-shutdown exemption: the monitor
-  suspends its consumer predicate and keeps the heartbeat fresh for the rest of
-  the process, which is safe only while something else owns the shutdown
-  deadline. A SIGTERM that does not come from a pod deletion can therefore
-  leave a pod Ready with no consumers. Existing behavior, newly documented in
-  `docs/LIMITATIONS.md`; bounding it is planned for 0.1.4.
+- Document the boundary of the graceful-shutdown exemption in
+  `docs/LIMITATIONS.md`: a SIGTERM that does not come from a pod deletion can
+  leave a pod Ready with no consumers. Existing behavior, newly documented.
 - Add `spec/integration/verify.sh topology`, a Linux matrix covering a shared
   PID namespace, the host PID namespace, a verified private-PID container, and
   a private-PID container whose checker cannot read `/proc/1/ns/mnt`.
@@ -69,12 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `Heartbeat#declare!` documents its actual `Integer` return value.
-- Replace `Heartbeat.container_generation` with `Heartbeat.topology`, which
-  returns a structured result rather than a string or `nil`; rename the
-  `Heartbeat.new` keyword `generation:` to `topology:`, which takes that result;
-  and remove the `KicksLiveness::GenerationGuard` module, whose methods are now
-  private to `Heartbeat`. All three are `@api private`, but a process that
-  called them by name needs updating.
+- Replace `Heartbeat.container_generation` with `Heartbeat.topology`, returning
+  a structured result instead of a string or `nil`; replace the `Heartbeat.new`
+  keyword `generation:` with `topology:`, accepting that result; and remove
+  `KicksLiveness::GenerationGuard`. All are `@api private`, but callers need
+  updating.
 
 ## [0.1.2] - 2026-09-11
 
