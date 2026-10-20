@@ -3,26 +3,11 @@ require 'fileutils'
 module KicksLiveness
   # Counts starts of a supervisor slot that have not reached healthy yet.
   #
-  # Deliberately separate from {Heartbeat}. Heartbeat is the contract shared
-  # with the probe and is loaded by it alone, so nothing the probe does not need
-  # belongs there — including the +fileutils+ this class requires freely.
+  # Persistent state survives fork respawns; its generation separates container
+  # incarnations when available. Kept outside {Heartbeat} because the probe does
+  # not read these counters.
   #
-  # The count lives in the marks directory rather than in memory because a
-  # respawn storm destroys process state every few hundred milliseconds: the
-  # supervisor brings a failing fork back after +start_worker_delay+, and every
-  # incarnation of the monitor believes it is the first. That is how an outage
-  # can produce thousands of identical INFO lines and not one ERROR. The
-  # directory is the only state that survives the fork.
-  #
-  # That directory outlives the container too, which is one restart too many:
-  # the count is about a fork that keeps failing, not about a volume. So each
-  # file carries the container generation, and a file from another generation
-  # counts as no previous start at all. Where there is no generation to write —
-  # off Linux, or where procfs did not yield one — the counter keeps its
-  # generation-less behaviour rather than pretending to a scope it cannot
-  # enforce.
-  #
-  # @see file:docs/DESIGN.md#logging-events-not-the-pulse
+  # @see file:docs/LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn
   # @api private
   class Attempts
     # @param dir [String] marks directory
@@ -72,11 +57,8 @@ module KicksLiveness
       File.join(@dir, "attempt-#{slot}")
     end
 
-    # A missing or unreadable counter means "no previous start", never an
-    # exception: this is instrumentation, and it may not break a worker. A
-    # counter from another container means the same thing, so a replacement
-    # container reports its own first start rather than continuing a run it did
-    # not take part in.
+    # Missing, unreadable, or foreign-generation counts start a new run.
+    # Counter failures must not prevent worker startup.
     def read(slot)
       count, epoch, generation = File.read(path(slot)).split
       return [0, nil] unless same_generation?(generation)

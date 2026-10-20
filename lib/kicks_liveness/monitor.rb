@@ -41,12 +41,8 @@ module KicksLiveness
     #
     # @return [Boolean] whether the process is healthy at this moment
     def tick!
-      # Re-declared on every tick, not only at startup. This file is the probe's
-      # only source for how many forks to expect, and nothing else restores it:
-      # if the directory is wiped, `touch!` brings back the slot marks while
-      # `expected` stays missing, and the probe reports "worker has not started"
-      # for the rest of the pod's life. It also lets a respawned set of forks
-      # correct the count after the supervisor was told to run fewer of them.
+      # Restore expected after directory removal; refreshing a slot alone
+      # cannot recover a probe whose expected count is missing.
       @heartbeat.declare!(@processes)
 
       if Registry.stopping?
@@ -88,21 +84,8 @@ module KicksLiveness
                  "processes=#{@processes} consumers=#{@consumers}")
     end
 
-    # A slot that starts again without ever having become healthy is a respawn
-    # loop: the supervisor brings the fork back after `start_worker_delay`,
-    # which is a fraction of a second, so the process dies long before any
-    # single monitor's grace period expires. Two things follow.
-    #
-    # The start line and the first transition are suppressed. Seeding
-    # `@previous` is what does the second part: without it the first tick reads
-    # a nil previous state and logs `waiting for N consumers`, which in a storm
-    # means hundreds of identical INFO lines a minute and no diagnosis in any of
-    # them.
-    #
-    # The escalation is driven off the marks directory instead of off
-    # `unhealthy_ticks`, because that counter dies with the fork and can never
-    # reach the threshold. Reporting once per grace window rather than once per
-    # respawn is the difference between one line a minute and five a second.
+    # Seed @previous to suppress repeated waiting messages. Escalation uses the
+    # persistent attempt window because unhealthy_ticks dies with each fork.
     def report_respawn(attempt, elapsed)
       @previous = false
 
@@ -116,8 +99,7 @@ module KicksLiveness
       @config.startup_grace_ticks * interval
     end
 
-    # Once the slot is healthy the respawn counter has done its job, and the
-    # next start of this slot deserves to be treated as a fresh one.
+    # Clear once after recovery so a later failure starts a new unhealthy run.
     def clear_attempt_once!
       return if @attempt_cleared
 
@@ -129,12 +111,9 @@ module KicksLiveness
       @unhealthy_ticks ||= 0
     end
 
-    # From the moment shutdown begins the consumer count says nothing about
-    # health: the workers unsubscribe one by one while the pool drains, and the
-    # process is doing exactly what it was told. So the predicate is dropped and
-    # the mark is kept fresh, which leaves a slow drain the whole of
-    # terminationGracePeriodSeconds instead of having the probe cut it short at
-    # max_age.
+    # Deliberate drain suspends the predicate for the rest of the process.
+    # An external deadline must bound it; the monitor does not own that deadline.
+    # @see file:docs/LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline
     def shutdown_tick!
       @heartbeat.touch!(@slot)
 
@@ -144,12 +123,8 @@ module KicksLiveness
       @shutdown_reported = true
     end
 
-    # Nothing inside this loop may be allowed to kill the thread. It is the only
-    # thing writing the mark, and its death is close to invisible: the exception
-    # surfaces as a bare backtrace on stderr, never through the gem's logger,
-    # while the pod restarts on every probe budget with nothing in the
-    # application log to explain it. `sleep` used to sit outside the guarded
-    # block, which is exactly how a non-positive tick killed the monitor.
+    # Guard tick and sleep together so an exception cannot kill the only
+    # heartbeat writer. Recovery uses the default interval.
     def run_loop
       loop do
         tick!
@@ -167,16 +142,13 @@ module KicksLiveness
       tick.is_a?(Numeric) && tick.positive? ? tick : Configuration::DEFAULT_TICK
     end
 
-    # Events are logged, not the pulse — the pulse lives in the mark's mtime.
-    # ERROR is reserved for genuine failure, because a logger usually comes up
-    # with LOG_LEVEL defaulting to error.
+    # Log transitions and startup escalation; the periodic pulse is the mtime.
     def report(healthy)
       if healthy != @previous
         report_transition(healthy)
         @previous = healthy
       elsif unhealthy_ticks == @config.startup_grace_ticks
-        # Startup took longer than normal, which is a failure by now. Staying
-        # silent would leave a pod that never comes up saying nothing about it.
+        # Report once when a surviving monitor exhausts startup grace.
         log(:error, "not healthy #{unhealthy_ticks * @config.tick}s, expected #{@consumers} consumers")
       end
     end
@@ -194,10 +166,8 @@ module KicksLiveness
     def log(level, message)
       @config.resolved_logger&.public_send(level, "[liveness] slot #{@slot}: #{message}")
     rescue StandardError
-      # Logging is diagnostic, while the heartbeat is the liveness contract. A
-      # broken custom logger must not prevent a mark from being written or kill
-      # the only thread that can refresh it. There is deliberately no fallback
-      # log here: calling the same logger again would only repeat the failure.
+      # Logger failures must not stop the heartbeat writer. Do not retry the
+      # same logger from its failure path.
       nil
     end
   end

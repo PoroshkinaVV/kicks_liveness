@@ -74,9 +74,8 @@ channel.open? && connection.open? && channel.any_consumers?
 | connection open, no consumers | unhealthy | the worker silently stopped consuming — a restart is the only cure |
 | not the whole set subscribed | unhealthy | a worker that quietly dropped out would otherwise leave the probe green |
 
-The last row is the reason the registry compares its size against an expected
-count rather than just checking that whatever registered is alive. Four healthy
-workers out of five look perfectly fine one object at a time.
+The expected count catches partial subscription: four healthy workers out of
+five must still make the process unhealthy.
 
 ### Nothing here talks to the broker
 
@@ -101,13 +100,10 @@ The predicate learns that a consumer was cancelled because RabbitMQ sends
 push, not a poll — which is what makes an in-memory predicate possible at all,
 and also where its limits come from. See [LIMITATIONS.md](LIMITATIONS.md).
 
-`recovering_from_network_failure?` is marked `@private` in Bunny's own
-documentation, so an upgrade may remove it. It is therefore called through
-`respond_to?`: without that guard the call would raise `NoMethodError`, `alive?`
-would catch it and report *unhealthy*, and every pod would enter a restart loop
-on the next Bunny upgrade. What the guard cannot preserve is the exemption
-itself — if the method disappears, so does "healthy while reconnecting",
-silently. That is the thing to re-check when upgrading Bunny.
+`recovering_from_network_failure?` is private Bunny API. The `respond_to?` guard
+avoids turning its removal into a rescued `NoMethodError` and an unhealthy
+verdict on every tick. Removal would still disable the recovery exemption
+silently; re-check this API when upgrading Bunny.
 
 ## The mark files
 
@@ -120,27 +116,22 @@ silently. That is the thing to re-check when upgrading Bunny.
 <dir>/topology-report  what the worker has already reported about it, once
 ```
 
-**`expected` closes a startup hole.** Without it the probe would pass as soon as
-any single file was fresh: fork 0 has written, fork 1 has not, and the pod looks
-ready while half of it is not subscribed. Every fork writes the same value, so
-they cannot disagree.
+**`expected` prevents partial startup from passing.** Checking only existing
+marks could accept fork 0's fresh mark before fork 1 has subscribed. Declaring
+the count tells the probe which marks must exist, not just which are fresh.
+With a fixed runner configuration, every fork declares the same count.
+Re-declaring on each tick also restores `expected` if the directory is
+wiped; refreshing slot marks alone would leave the probe permanently unhealthy.
+Live worker-count changes remain
+[unsupported](LIMITATIONS.md#changing-the-worker-count-at-runtime-is-not-supported).
 
-Every fork rewrites it on every tick, not only at startup. Nothing else restores
-it: if the directory is wiped, `touch!` brings the slot marks back while
-`expected` stays missing, and the probe reports "worker has not started" for the
-rest of the pod's life. Rewriting it is also what lets a respawned set of forks
-correct a count that has been lowered.
-
-**`generation` closes a container-restart hole when the container owns PID 1.**
-Kubernetes preserves an `emptyDir` when it restarts a container inside the same
-pod. That is useful for an application cache elsewhere in the volume, but a
-fresh heartbeat from the dead process must not let the new container pass its
-one-shot `startupProbe`. On Linux, the worker and exec probe independently
-derive the same incarnation from the container's mount namespace and PID 1
-start time. Both `generation` and every slot mark carry it. Until the new
-container declares itself and every current fork publishes its own mark, files
-inherited from the previous container are rejected. Nothing outside the marks
-directory is removed.
+**`generation` rejects inherited heartbeats.** With usable Linux procfs and a
+container-private PID namespace, the worker and exec probe derive it from the
+mount namespace and PID 1 start time. Both `generation` and every slot mark must
+match the current incarnation, so an `emptyDir` preserved across a container
+restart cannot pass `startupProbe` until all replacement forks publish. No
+application cache is removed. Procfs and PID-topology limits are described in
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
 
 **`topology-unsafe` carries terminal evidence from the worker.** Each participant
 compares `/proc/1/ns/mnt` with `/proc/self/ns/mnt` independently. A worker that
@@ -149,48 +140,36 @@ it before `expected`, generation, or freshness. Omitting a new generation would
 leave inherited marks eligible for acceptance. Weaker evidence never clears
 this file.
 
-**`topology-report` deduplicates worker diagnostics across forks.** It is the
-only file here the probe ignores. Claiming a report locks the file around the
-read-compare-write operation; atomic rename alone cannot prevent concurrent
-claims. The file is cleared by truncation so every fork keeps locking the same
-inode. See
-[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace)
-for the conditions for rejection, degraded states, and operator recovery.
+**`topology-report` deduplicates worker diagnostics across forks.** The probe
+ignores it. Claims lock the complete read-compare-write operation; atomic rename
+alone cannot prevent concurrent claims. Clearing by truncation keeps every fork
+locking the same inode.
 
-**Files are named by supervisor slot, not by PID.** A fork killed with SIGKILL
-is respawned into the same slot and overwrites its own file. Had the name
-contained a PID, that file would sit there stale forever and the probe would
-fail permanently, turning one dead fork into a pod that can never come back.
+**Slot names survive fork replacement.** A respawn overwrites its predecessor's
+mark. PID-based names would leave stale files that permanently fail the probe.
 
-`expected` is written through a temporary file and a `rename`, not with a plain
-write. A plain write truncates first, and a probe reading in that window finds
-the file empty and reports that the worker has not started. The window is real
-and recurring: every fork rewrites this file on every tick, while the liveness
-probe reads it on a schedule of its own. `rename` is atomic on tmpfs, so the
-probe sees either the old value or the new one.
+`expected` and slot marks are published through temporary files and `rename`.
+Concurrent probes therefore see complete old or new contents, never a truncated
+count or a mark missing its generation. Temporary filenames include the writer's
+PID so concurrent forks cannot overwrite one another's temporary files.
 
-**`attempt-<slot>` is the respawn counter**, and it lives in this directory for
-the single reason that the directory outlives the fork: a monitor caught in a
-respawn loop is a brand-new object every few hundred milliseconds and can hold
-no counter of its own. It outlives the *container* too, which is one restart too
-many, so the file carries the generation that wrote it and one from another
-generation counts as no previous start. The file is removed once the slot
-becomes healthy, so in steady state the directory holds `expected`,
-`generation`, and the `worker-<slot>` marks. What the counter is for is in
+**`attempt-<slot>` persists an unhealthy run across fork respawns.** Its
+generation rejects counts from a previous container when one can be derived.
+The first healthy tick removes it. Reporting windows and generation-less scope
+are explained in
 [LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).
 
 The timestamp, pid, and slot in `worker-<slot>` exist for a human running
 `kubectl exec ... cat`. Its generation is part of the probe contract; freshness
 still comes from mtime.
 
-The directory must be on tmpfs — in Kubernetes, an `emptyDir` with
-`medium: Memory`. Put it on a real disk and the probe starts depending on the
-disk again, which was defect number two.
+Use tmpfs — an `emptyDir` with `medium: Memory` in Kubernetes — to keep mark
+reads independent of disk stalls.
 
 ## Why the heartbeat file has no `require` of its own
 
-The probe loads exactly one file and nothing else. Measured over 30 invocations
-each; absolute values depend on the hardware, but the ratios do not:
+The probe entry point loads only `heartbeat.rb`. Recorded over 30 invocations
+each; timings vary with the runtime and hardware:
 
 | | per invocation |
 |---|---|
@@ -200,22 +179,13 @@ each; absolute values depend on the hardware, but the ratios do not:
 | the probe, found through RubyGems | 43 ms |
 | **`bundle exec ruby -e ''`** | **300 ms** |
 
-Subtract the baselines and the probe's own work is a **few milliseconds**.
-Everything else is interpreter startup, and 28 ms of that is RubyGems
-initializing.
-
-Three consequences follow. `bundle exec kicks-liveness` is the portable
-default; most of its runtime is Bundler startup rather than the check itself.
-When the gem is installed in `GEM_HOME`, RubyGems can find it with a plain
-`require` for under 50 ms. Skipping RubyGems entirely is faster still, but it
-requires naming the path to the gem's `lib` directory; see
-[KUBERNETES.md](KUBERNETES.md) for when that trade is worth making.
-
-Keeping the probe's path through the heartbeat file free of `require`
-statements — and the file free of references to the rest of the gem — is what
-makes all three possible. The single `require` the file does contain,
-`fileutils`, is lazy and sits in the directory-creation branch that only the
-worker ever reaches.
+Interpreter and dependency startup dominate these measurements. `bundle exec`
+is the portable default; direct loading depends on where the image installs
+the gem, as described in [KUBERNETES.md](KUBERNETES.md#where-your-image-puts-its-gems).
+`heartbeat.rb` therefore references no other gem code and requires `fileutils`
+only in the worker's directory-creation branch. Worker-only counters and report
+deduplication live in `Attempts` and `TopologyReport` so their code and requires
+stay outside the probe's load path.
 
 ## Where the hooks attach
 
@@ -229,56 +199,36 @@ Railtie in Rails), covering four methods:
 - `Sneakers::WorkerGroup#stop` — record that the shutdown is deliberate, *before*
   `super` starts unsubscribing.
 
-`after_fork` rather than `run`, even though `run` is where the monitor must
-ultimately live: `Sneakers::WorkerGroup#run` calls `after_fork` as its very first
-statement and only then resolves `worker_classes`, so hooking `after_fork` is the
-earliest point in the fork at which the application's own `after_fork` hook has
-already run. That matters because resolving the expected consumer count may run
-application code — under `sneakers:active_job` the set is a callable registry —
-and the standard use of `after_fork` is re-establishing the connections a fork
-inherited. Resolving the set first would run that code against a fork that is not
-ready yet, and the `rescue` around the start would then leave the pod with no
-monitor at all. A spec asserts this ordering against the real worker gem, so an
-upgrade that reorders `run` fails in CI rather than in production.
+`WorkerGroup#run` calls `after_fork` before resolving `worker_classes`. Starting
+after that hook lets the application restore inherited connections before the
+consumer count runs application code. This matters for the callable registry
+used by `sneakers:active_job`; resolving it too early can prevent monitor startup.
+A spec pins this ordering against the worker gem.
 
-`ServerEngine::Server#create_worker` calls `w.extend(@worker_module)`: the
-`WorkerGroup` module lands in the singleton class of the *instance*, not as an
-`include` in a class. A `prepend` to the module still sits ahead of it in that
-lookup chain, which is what makes the hook work; `worker_id` and `config` come
-from `ServerEngine::Worker`. Verified on serverengine 2.4.0, and covered by a
-spec that asserts the order in `ancestors` — this is the most fragile assumption
-in the gem, so it fails in CI rather than in production.
+ServerEngine 2.4.0 uses `w.extend(@worker_module)`, placing `WorkerGroup` in the
+instance's singleton-class chain. Prepending to the module still intercepts its
+methods; an `ancestors` spec verifies that assumption. `worker_id` and `config`
+come from `ServerEngine::Worker`.
 
 Slot numbers come from `worker_id`, which is the index into ServerEngine's
 `@monitors` array, and both `start_new_worker(wid)` and `restart_worker(wid)`
 reuse the same index. That is what the slot-not-PID scheme relies on.
 
-The monitor thread is created inside the fork, because threads do not survive
-`fork`. Starting it earlier would accomplish nothing. For the same reason the
-registry initializes its array and mutex at file-load time: that happens once,
-single-threaded, before any fork, so no lazy initialization is needed and none
-can race.
+The monitor thread is created inside the fork because threads do not survive
+`fork`. The registry's array and mutex are initialized at load time, before
+forking, avoiding races during lazy initialization.
 
-In Rails the hooks are installed from a Railtie, and from `to_prepare` rather
-than an `initializer`. An application's `lib` is normally managed by Zeitwerk and
-reloadable, and reloadable constants must not be referenced while the
-application is initializing.
-
-Starting the monitor is wrapped in a `rescue`: instrumentation has no right to
-prevent a worker from starting. `Dir.mkdir` raises `Errno::EROFS` if the marks
-directory was never mounted, and resolving the worker set runs application code.
-The worst outcome should be a missing mark and a pod restart, never a pod that
-stays up with silent queues.
+The Rails Railtie registers installation through `to_prepare`, allowing access
+to reloadable worker constants after initialization. Startup exceptions, from
+either application code or an unwritable marks directory, are logged without
+preventing the worker from starting. The probe remains responsible for detecting
+a missing or stale heartbeat.
 
 ### The expected consumer count is not configured
 
-It is derived from `config[:worker_classes]` — the very set from which the
-worker gem builds its workers. The queue list is therefore never duplicated and
-cannot drift from the application's configuration.
-
-That value is an array of classes under `sneakers:run` and a callable registry
-under `sneakers:active_job`, so it is resolved with a `respond_to?(:call)`
-check.
+`config[:worker_classes]` is the set the worker gem itself consumes: an array
+under `sneakers:run`, a callable registry under `sneakers:active_job`. Resolve it
+with `respond_to?(:call)` rather than maintaining a separate queue list.
 
 ## What is configurable, and where
 
@@ -288,52 +238,28 @@ check.
 | `tick` | either, and the config block wins | only the worker reads it, so two sources cannot contradict each other |
 | `dir`, `max_age` | environment variables **only** | the probe is a separate process |
 
-`dir` and `max_age` are deliberately *not* settable from the application. The
-probe is launched by the kubelet as its own process; it never reads, and cannot
-read, the application's initializer. If those two values were configurable in
-both places, a mismatch between what the worker writes and what the probe
-expects would pass unnoticed — and that mismatch is silent by nature: the worker
-would look fine and the probe would look broken. Making them read-only from the
-application removes the failure mode instead of documenting it. A spec asserts
-that `Configuration` does not respond to `dir=` or `max_age=`.
+The exec probe cannot read an application initializer, so `dir` and `max_age`
+have one source: the environment. Specs reject application setters for both.
+Only the worker reads `tick`, so `config.tick` may override
+`KICKS_LIVENESS_TICK` without contradicting the probe.
 
-`tick` is the opposite case and may be set from either side, because only the
-worker ever reads it: with a single reader there is nothing for a mismatch to
-happen between. `KICKS_LIVENESS_TICK` supplies the initial value and the
-configuration block overrides it, so `config.tick = 5` wins over the variable.
+Environment durations must be positive integers; missing, empty, unparseable,
+zero, and negative values use defaults. If the effective tick is at least
+`max_age`, it warns on stderr and uses the default tick when safe, or half of
+`max_age` otherwise. The warning is deferred until the tick is read, so an
+initializer override or a disabled monitor does not produce a misleading WARN.
 
-Values arriving from a ConfigMap are parsed defensively: garbage falls back to
-the default rather than crashing the worker, and an empty string counts as
-"unset" — in a ConfigMap that is what you get by declaring a key and leaving it
-blank.
+Invalid ConfigMap input falls back so a deployment typo does not prevent worker
+startup. Initializer values are application code: invalid values raise
+`ArgumentError` at boot, where the developer can fix the error, rather than
+silently substituting a default. `tick` must be a positive number smaller than
+`max_age`, and `startup_grace_ticks` a positive integer. The latter is compared
+with an integer counter; accepting a float or zero would disable escalation.
 
-`max_age` and `tick` are durations, so a value must be parseable *and* positive.
-Zero and negative numbers are the more dangerous half: they parse perfectly
-well, a tick of zero turns the monitor into a hot loop, and a negative `max_age`
-makes every mark stale on arrival, so the probe can never pass again. They fall
-back to the default too.
-
-Setting `tick` from the application is held to a stricter standard: a
-non-positive value raises `ArgumentError`, as does a value greater than or equal
-to `max_age`: such a monitor would inevitably let a healthy mark go stale. The
-environment gets a silent fallback for values that cannot be parsed. If its
-effective tick is greater than or equal to `max_age`, configuration emits a
-warning on stderr and uses the default tick when it is safe, or half of `max_age`
-otherwise. A ConfigMap typo must not bring a worker down, whereas an initializer
-is code and should fail loudly at boot, where the developer is looking.
-
-`startup_grace_ticks` must be a positive integer. It is compared directly with
-an integer counter; accepting zero, a float, or a string would silently disable
-the escalation that is supposed to diagnose a worker that never subscribes.
-
-The logger defaults to `Sneakers.logger` but is resolved lazily, because at the
-time the configuration object is built it may not be set up yet.
-
-Logging is diagnostic; the heartbeat is the liveness contract. An exception
-raised by a custom logger is therefore swallowed at the logging boundary. It
-cannot prevent a healthy tick from writing its mark, abort monitor startup, or
-escape the loop's error handler and kill the monitor thread. No fallback message
-is attempted through the same broken logger.
+The default logger is resolved lazily from `Sneakers.logger`, which may be unset
+during configuration. Logger exceptions are swallowed at the logging boundary
+so they cannot prevent heartbeat publication or stop the monitor. No fallback
+uses the same broken logger.
 
 ## Logging: events, not the pulse
 
@@ -354,40 +280,18 @@ add noise. What gets logged is transitions.
 | the monitor thread caught an exception | ERROR |
 | the monitor could not be started at all | ERROR |
 
-The last three rows are claimed through one file in the marks directory, so a
-worker reports each state once rather than once per fork and once per respawn.
-Only the unsupported topology is an ERROR: it is the probe's verdict as well,
-and no pod recovers from it without being recreated.
+`topology-report` deduplicates only the three topology results: `unverifiable`,
+`unavailable`, and `unsafe`. Their warning frequency, probe output, and recovery
+are described in
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
+Loop and startup exceptions do not use that flag.
 
-The two WARN rows are the states in which the probe keeps its own verdict and
-says nothing extra: an exec probe's stdout is read through the kubelet's
-`Unhealthy` event, so a diagnostic appended there would repeat on every
-invocation beside reasons it has nothing to do with. Each is reported once — per
-container incarnation where there is a generation to key that to, and otherwise
-for as long as the error state lasts, because a fork respawn would otherwise
-repeat it every few hundred milliseconds.
+ERROR must survive the usual error-level logger filter, while normal startup
+and deliberate shutdown remain INFO. On shutdown the monitor suspends its
+predicate and refreshes the mark for the rest of the process, assuming an
+[external deadline](LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline).
 
-ERROR is reserved for genuine failure. A logger typically comes up with
-`LOG_LEVEL` defaulting to `error`, so anything important must survive that
-filter — while an ordinary pod start must not emit ERROR on every deploy, or an
-alert on ERROR logs fires on every rollout and is promptly muted.
-
-A graceful shutdown is the other half of that rule. `Sneakers::Worker#stop`
-unsubscribes and then waits for the thread pool to drain, which takes as long as
-the longest in-flight job — and the registry empties at the start of it. Judged
-by the consumer count that is indistinguishable from a fault, so every single
-deploy would emit an ERROR. From `WorkerGroup#stop` onwards the predicate is
-therefore suspended: the monitor says so once at INFO and keeps the mark fresh,
-so a slow drain gets the full `terminationGracePeriodSeconds` instead of having
-the probe cut it short at `max_age`.
-
-That exemption lasts for the rest of the process and assumes the deadline is
-somebody else's — the kubelet's, during a pod deletion. A SIGTERM that arrives
-any other way enters the same path with nothing bounding it, which is
-[a documented boundary](LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline)
-rather than a property of the design.
-
-The startup grace exists because a slow start and a start that will never finish
-look identical for the first few ticks. Once the grace expires, staying silent
-would mean a pod that never comes up never says so — hence exactly one ERROR,
-not one per tick.
+Startup grace postpones the error for a slow initial subscription; a surviving
+monitor reports once when it expires. Fork-respawn loops use the persistent
+counter and reporting windows described in
+[LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).

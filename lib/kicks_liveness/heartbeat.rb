@@ -146,21 +146,12 @@ module KicksLiveness
     end
   end
 
-  # The liveness marks on the filesystem: written by the worker, read by the
-  # probe.
+  # Filesystem contract shared by the worker and probe. The marks directory
+  # must be on tmpfs (an emptyDir with medium: Memory in Kubernetes).
   #
-  # The directory must live on tmpfs — in Kubernetes, an emptyDir with
-  # <tt>medium: Memory</tt>. Put it on a real disk and the probe starts
-  # depending on the disk again, and a stalling disk is one of the most common
-  # causes of false restarts.
-  #
-  # This file deliberately runs no +require+ on the probe's path and refers to
-  # nothing else in the gem: the probe can load it alone, with no application
-  # code and no Rails behind it. That keeps the optional direct form at ~43 ms
-  # and lets it run on a bare interpreter with +--disable-gems+ when the image
-  # allows it -- whether Bundler is in the picture depends on where the image
-  # put its gems, not on this file. The one +require+ it does contain is lazy,
-  # in a branch only the worker reaches.
+  # The probe loads this file alone, including under --disable-gems. Keep its
+  # read path free of requires and references to other gem code; fileutils is
+  # loaded lazily only when the worker needs to create parent directories.
   #
   # @see file:docs/DESIGN.md#why-the-heartbeat-file-has-no-require-of-its-own
   class Heartbeat
@@ -198,15 +189,9 @@ module KicksLiveness
       value unless value.nil? || value.empty?
     end
 
-    # Values arrive from a ConfigMap, and a typo there is no reason to bring a
-    # worker down — garbage falls back to the default.
-    #
-    # Both settings are durations, so a value has to be parseable *and*
-    # positive. Zero and negative numbers parse perfectly well and are the more
-    # dangerous half: a tick of zero turns the monitor into a hot loop, a
-    # negative one used to kill the monitor thread on its first sleep, and a
-    # negative max_age makes every mark stale on arrival, so the probe can never
-    # pass again.
+    # Environment durations require positive integers. Invalid input falls
+    # back to the default; accepting zero or negatives can stop the monitor
+    # or make healthy marks stale immediately.
     #
     # @param key [Symbol] one of the keys of {ENV_NAMES}
     # @param default [Integer]
@@ -252,15 +237,8 @@ module KicksLiveness
     #   incarnation, and the incarnation itself where there is one
     attr_reader :topology
 
-    # Records how many forks the probe must wait for. Every fork writes the same
-    # value. Without it the probe would pass as soon as any single mark was
-    # fresh, while half the workers had not subscribed yet.
-    #
-    # Written through a rename, because a plain write truncates first: a probe
-    # reading in that window finds the file empty and reports that the worker
-    # has not started. The window is real and recurring — every fork rewrites
-    # this file on every tick, while the liveness probe reads it on a schedule
-    # of its own. Rename is atomic on tmpfs.
+    # Declares how many fork marks the probe requires. Atomic publication
+    # prevents a concurrent probe from reading a truncated count or generation.
     #
     # @param processes [Integer]
     # @return [Integer] bytes written
@@ -272,17 +250,9 @@ module KicksLiveness
       atomic_write(expected_path, processes)
     end
 
-    # Refreshes this fork's mark.
-    #
-    # The file is named by supervisor slot, not by PID: a fork killed with
-    # SIGKILL is respawned into the same slot and overwrites its own file. With a
-    # PID in the name that file would stay stale forever and the probe would fail
-    # permanently.
-    #
-    # The timestamp, pid and slot exist for a human running
-    # <tt>kubectl exec ... cat</tt>. The generation is also checked by the probe:
-    # a Kubernetes emptyDir survives a container restart, so freshness alone
-    # cannot distinguish this process from the one that just exited.
+    # Refreshes the supervisor slot, so a respawn replaces the old mark instead
+    # of leaving a stale PID-named file. The probe checks generation and mtime;
+    # the remaining contents are diagnostic.
     #
     # @param slot [Integer] supervisor slot of this fork
     # @return [Integer] bytes written
@@ -314,9 +284,6 @@ module KicksLiveness
 
     # The probe side: is every declared fork's mark present and fresh?
     #
-    # The returned message names slots the way the files are named, so that a
-    # human reading the Unhealthy event knows which file to look at.
-    #
     # Published or local unsafe evidence takes precedence over every generation
     # and freshness check, including when this probe cannot verify the topology.
     #
@@ -336,13 +303,8 @@ module KicksLiveness
 
     private
 
-    # One syscall on the happy path, and whichever fork gets there first wins.
-    #
-    # +Dir.mkdir+ creates a single level and raises ENOENT when the parent is
-    # missing, which any nested KICKS_LIVENESS_DIR hits. FileUtils is required
-    # here rather than at the top of the file: only the worker ever creates the
-    # directory, and the probe's path through {#check} must stay free of
-    # requires.
+    # Try one mkdir first; competing forks may already have created it.
+    # Only missing parent directories need fileutils, loaded on the worker path.
     def make_dir
       Dir.mkdir(@dir)
     rescue Errno::EEXIST

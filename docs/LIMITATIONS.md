@@ -39,25 +39,17 @@ aware that this probe no longer covers that failure mode.
 
 ## Broker unavailability is invisible by design
 
-While Bunny is recovering from a network failure, the probe reports healthy. This
-is deliberate: the alternative is that a ten-second broker hiccup restarts every
-replica simultaneously and reconnects them all at once, which is what a
-struggling broker least needs. Bunny reconnects and re-subscribes its consumers
-by itself, so a restart at that moment cures nothing.
-
-The consequence, plainly: a pod whose broker is unreachable looks healthy to
-this probe. Cover it with the alert.
+The probe reports healthy while Bunny recovers an established connection and
+re-subscribes consumers. This avoids restarting every replica during a broker
+outage, but also means an unreachable broker is invisible to this probe. Cover
+that case with the external consumer alert.
 
 ## The recovery exemption covers an established connection, not a failed subscribe
 
-While Bunny is recovering from a network failure the probe reports healthy, so
-that a broker hiccup does not restart every replica at once. That exemption is
-asked of a `connection` object, which has to exist before it can be asked.
-
-If the broker is unreachable at the moment a worker subscribes, there is no
-connection at all: the registry stays empty and no mark is ever written. So the
-cascade the exemption avoids for a live connection is still possible at startup
-— broker down, every replica restarting.
+The exemption requires a connection object. If the initial subscription fails,
+the worker never registers and no mark is written. A broker outage at startup
+can therefore restart every replica even though an established connection would
+be exempt.
 
 The budget here is the **startup** one, not the steady-state one:
 
@@ -80,26 +72,17 @@ see the respawn escalation below.
 
 ## Graceful shutdown is safe only when something else owns the deadline
 
-`Sneakers::WorkerGroup#stop` removes consumers before waiting for their thread
-pools to drain. From inside the process that looks exactly like a consumer
-failure, so `Registry.stopping!` deliberately suspends the consumer predicate
-before the first worker stops. The monitor keeps the heartbeat fresh for the
-rest of the process lifetime instead of letting liveness interrupt an in-flight
-job.
+`Registry.stopping!` suspends the consumer predicate before `WorkerGroup#stop`
+unsubscribes workers and drains their pools. The monitor keeps the heartbeat
+fresh for the rest of the process so liveness does not interrupt an in-flight
+job. During pod deletion the kubelet enforces `terminationGracePeriodSeconds`,
+which bounds this exemption externally.
 
-That exception assumes an external shutdown deadline. During an ordinary
-Kubernetes pod deletion the assumption holds: the kubelet owns
-`terminationGracePeriodSeconds` and eventually terminates a container whose
-drain does not finish. The fresh heartbeat only prevents the probe from cutting
-the process short before that deadline.
-
-SIGTERM does not prove that the pod is being deleted, however. An operator,
-sidecar, or in-container supervisor can send the same signal while the pod stays
-in service. If Sneakers or Bunny then waits indefinitely while draining or
-reconnecting, there is no kubelet deadline to end it. The process can have zero
-consumers while its heartbeat is refreshed on every tick; the probe continues
-to return success and the pod can remain Ready indefinitely. The process cannot
-distinguish the source of the signal after receiving it.
+A SIGTERM from an operator, sidecar, or internal supervisor enters the same
+path without deleting the pod. If Sneakers or Bunny then drains or reconnects
+indefinitely, the heartbeat stays fresh with zero consumers and the pod can
+remain Ready forever. The process cannot infer an external deadline from the
+signal.
 
 This is existing shutdown behaviour, not a 0.1.3 regression. Until the exemption
 is bounded — planned for 0.1.4 — send SIGTERM only through a termination path
@@ -155,46 +138,28 @@ outside this container. The probe exits 1 with
 unsupported PID topology: pod must not set shareProcessNamespace or hostPID
 ```
 
-Neither participant owns that verdict alone, because procfs access is local to a
-process and the worker's credentials need not match the probe's. So a worker
-that can prove it publishes `topology-unsafe` in the marks directory instead of
-a heartbeat, and every probe reads that first — before `expected`, before its
-own procfs, before any freshness check. Proof from either side is enough, and
-nothing weaker takes it back: an inherited `generation` file may still be lying
-in the volume, and marks published by another fork are not evidence of safety.
+Procfs access can differ between the worker and probe. A worker that proves the
+topology unsafe publishes `topology-unsafe` instead of a heartbeat; a probe
+rejects either that file or its own unsafe result before checking marks.
+Inherited generations and another fork's marks cannot override the verdict.
 
-The worker reports it once at ERROR, naming the detail it proved and the way
-out. Once, not once per fork and not once per respawn: a fork that also cannot
-subscribe comes back every few hundred milliseconds, and a topology it cannot
-change would otherwise fill the log. There is no honest incarnation boundary to
-key that promise to — that the incarnation cannot be trusted is the finding
-itself — so a later container in the same pod stays silent and the verdict is
-read from the probe, in the kubelet's `Unhealthy` event, and from the file.
+The worker logs the reason and recovery at ERROR once for the uninterrupted
+unsafe state, across forks and container restarts sharing the volume. Later
+containers in that pod therefore do not repeat the ERROR; read the verdict from
+the kubelet's `Unhealthy` event or `topology-unsafe`.
 
-The state is terminal for the life of the marks volume, and deliberately so.
-Neither setting can be changed on a live pod, and the `emptyDir` is destroyed
-with the pod, so there is no supported transition from this state back to a safe
-one. **Recovery is recreating the pod without those settings.** Until then the
-container fails its probes and restarts, which is the honest outcome: the
-alternative is a pod that looks healthy while nothing guarantees the heartbeat
-belongs to the process that is running.
-
-This is the fail-closed branch, not the default outcome promised for every
-cluster. A normal capability set does not include `CAP_SYS_PTRACE`, and a pod
-sandbox or node process may have credentials that make its namespace link
-unreadable to the worker and exec probe. Those cases take one of the degraded
-branches below instead of guessing.
+This state is terminal for the marks volume. Neither PID setting can change on
+a live pod, and its `emptyDir` dies with it. **Recovery is recreating the pod
+without those settings.** Until then probes fail and the container restarts.
+Unreadable namespace links do not establish this verdict; they take a degraded
+branch below.
 
 ### Unverifiable: the 0.1.2 guarantee, and one warning
 
-Reading another process's namespace link is a ptrace-level operation, so
-`/proc/1/ns/mnt` can be unreadable — most simply when PID 1 runs as a different
-user. That is *not* proof of anything, and treating it as proof would fail a
-correctly configured private-PID deployment closed.
-
-So the generation is derived and checked exactly as 0.1.2 checked it, the probe
-behaves and prints exactly as it otherwise would, and the worker logs one
-warning:
+Reading `/proc/1/ns/mnt` is a ptrace-level operation and may be denied, including
+when PID 1 runs as a different user. Denial cannot distinguish a valid private
+PID namespace from an unsupported topology. If the other procfs entries yield a
+generation, the probe retains its 0.1.2 check and output; the worker logs:
 
 ```
 WARN [liveness] slot 0: PID topology unverified (cannot read /proc/1/ns/mnt (Errno::EACCES)):
@@ -202,16 +167,10 @@ the container generation still scopes the heartbeat, but shareProcessNamespace a
 cannot be ruled out
 ```
 
-Read that as unverifiable, not as safe: if the pod does set one of the two, this
-is the state it lands in whenever the link cannot be read, and the 0.1.2
-weakness above is then still present. It is warned about once per container
-incarnation, not once per fork, because a respawn loop would otherwise turn one
-lost guarantee into thousands of identical lines.
-
-This was the measured default for `shareProcessNamespace: true`: the pod sandbox
-ran as UID 65535, the worker as root without `CAP_SYS_PTRACE`, and both worker and
-probe were denied access to the sandbox's namespace link. Adding the capability
-made the difference visible and moved the same topology to `unsafe`.
+Read this as unverifiable, not safe: an unsupported topology still has the
+0.1.2 inherited-heartbeat weakness. The WARN is once per derived generation,
+across fork respawns. The measured Kubernetes shared-PID case reached this state;
+its credentials and capability comparison are recorded in VERIFYING.md above.
 
 There is a narrower startup window when the worker and probe have asymmetric
 access: the worker can prove the topology unsafe, but the probe cannot. Before
@@ -229,12 +188,10 @@ publishes its verdict.
 
 ### No generation at all
 
-If procfs yields no identifier — `/proc/self/ns/mnt` or `/proc/1/stat` missing,
-unreadable, or unparseable — the guard falls back to the 0.1.1 freshness-only
-check, which cannot tell a fresh mark left by the previous container from one
-written by this process. The worker warns once for as long as that state lasts,
-and a later successful derivation clears the flag so a new degradation is
-reported again:
+If `/proc/self/ns/mnt` or `/proc/1/stat` cannot yield a generation, the probe
+falls back to the 0.1.1 freshness-only check and may accept fresh inherited
+marks. The worker warns once for the uninterrupted unavailable state. A verified
+topology clears the report flag so a later degradation is reported again:
 
 ```
 WARN [liveness] slot 0: no container generation (cannot read /proc/1/stat (Errno::EACCES)):
@@ -242,30 +199,17 @@ falling back to freshness only, which cannot reject a heartbeat inherited from a
 container
 ```
 
-A parsed start time of zero has its own diagnostic:
+A zero start time uses the detail `PID 1 start time is zero; possible hostPID or
+virtualized procfs` in that warning. The field counts clock ticks after boot,
+so zero is valid, not a parse error. It was observed for node init in a host-PID
+pod, but may also be exposed for a legitimate PID 1 by virtualized procfs.
+Without measurements of those runtimes, zero alone remains `unavailable`.
 
-```
-WARN [liveness] slot 0: no container generation (PID 1 start time is zero; possible hostPID or virtualized procfs):
-falling back to freshness only, which cannot reject a heartbeat inherited from a previous
-container
-```
-
-Linux defines the field as clock ticks after system boot, so zero is a valid
-value rather than a malformed stat line. It was the measured value for node init
-in a `hostPID: true` pod, but 0.1.3 does not treat it as proof: a runtime with a
-virtualized procfs may expose the same value for a legitimate container PID 1.
-The state remains `unavailable` until those runtimes have been measured.
-
-Off Linux there is no procfs to read, and the same fallback applies **silently**:
-that is an intentional compatibility mode — the gem outside a Linux container —
-rather than a Linux environment where a value that exists in principle could not
-be read. Linux Kubernetes, Docker, and Nomad containers expose the required
-entries under their normal configuration.
-
-Neither fallback is ever reported on the probe's stdout. An exec probe's output
-reaches a human only through the kubelet's `Unhealthy` event, where a diagnostic
-repeated on every invocation would sit beside reasons it has nothing to do with.
-A proven unsafe topology is different: there the verdict *is* the probe's answer.
+Off Linux the same freshness-only fallback is **silent**, an intentional
+compatibility mode. Degraded Linux warnings also stay off the probe's stdout:
+they belong in the worker log, not repeated beside unrelated failures in
+`Unhealthy` events. A proven unsafe topology is different: it is the probe's
+verdict.
 
 ### The probe must run in the worker's container
 
@@ -277,32 +221,20 @@ Kubernetes exec probes already run inside the container they check; do not move
 
 ## A respawn loop is reported once per grace window, not once per respawn
 
-When a fork cannot subscribe at all, the supervisor brings it back after
-`start_worker_delay` — a fraction of a second — and the monitor in each
-incarnation is a brand-new object. Any counter it holds is destroyed before it
-can reach a threshold, which is how a real outage used to produce thousands of
-identical INFO lines and not a single ERROR.
-
-The count is therefore kept in the marks directory, which survives the fork.
-The start line is logged once, repeated starts within the grace window
-(`startup_grace_ticks × tick`) are silent, and after that one ERROR per window
-reports the elapsed time and the number of starts:
+The supervisor respawns a fork that cannot subscribe after `start_worker_delay`,
+potentially before its monitor reaches startup grace. `attempt-<slot>` therefore
+keeps the count and window start outside process memory. The first incarnation
+logs startup, further starts within `startup_grace_ticks × tick` are silent, and
+each expired window produces one ERROR with elapsed time and cumulative starts:
 
 ```
 [liveness] slot 0: not healthy 62s over 305 starts, expected 5 consumers
 ```
 
-The number of starts is the diagnosis: it separates a slow start from a respawn
-loop at a glance.
-
-The count belongs to a container, not to a volume: each `attempt-<slot>` file
-carries the generation that wrote it, and one from another generation counts as
-no previous start. A replacement container therefore logs its own `started:`
-line and never escalates over starts it did not take. Where there is no
-generation to write — off Linux, or where procfs did not yield one — the counter
-keeps its volume-wide 0.1.1 scope, because there is nothing honest to scope it
-to; treat the count there as "starts since this slot was last healthy in this
-pod".
+The generation in the file rejects an earlier container's count. A replacement
+logs its own `started:` and cannot escalate over starts it did not take; the
+first healthy tick clears the counter. Without a generation, the old volume-wide
+scope remains: read it as starts since this slot was last healthy in the pod.
 
 ## Do not install both `kicks` and `sneakers`
 
