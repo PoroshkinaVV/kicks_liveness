@@ -48,6 +48,12 @@ spec:
               command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
             initialDelaySeconds: 10
             periodSeconds: 5
+            # rabbitmq-diagnostics starts an Erlang VM and connects to the node,
+            # which does not fit in the kubelet's one-second default on a busy
+            # machine: the probe then errors with DeadlineExceeded on every
+            # attempt, the broker never goes Ready, and `up` times out waiting
+            # for a rollout of a broker that is in fact serving.
+            timeoutSeconds: 10
             failureThreshold: 24
           resources:
             requests:

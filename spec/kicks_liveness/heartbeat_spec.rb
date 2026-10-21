@@ -1,7 +1,7 @@
 require 'tmpdir'
 
 RSpec.describe KicksLiveness::Heartbeat do
-  subject(:heartbeat) { described_class.new(dir: dir, max_age: 45, generation: nil) }
+  subject(:heartbeat) { described_class.new(dir: dir, max_age: 45, topology: non_linux_topology) }
 
   let(:tmp) { Dir.mktmpdir }
   let(:dir) { File.join(tmp, 'health') }
@@ -53,8 +53,8 @@ RSpec.describe KicksLiveness::Heartbeat do
   end
 
   describe 'container generations' do
-    let(:old) { described_class.new(dir: dir, max_age: 45, generation: 'mnt:[1]:100') }
-    let(:current) { described_class.new(dir: dir, max_age: 45, generation: 'mnt:[2]:200') }
+    let(:old) { described_class.new(dir: dir, max_age: 45, topology: verified_topology('mnt:[1]:100')) }
+    let(:current) { described_class.new(dir: dir, max_age: 45, topology: verified_topology('mnt:[2]:200')) }
 
     before do
       old.declare!(1)
@@ -112,6 +112,80 @@ RSpec.describe KicksLiveness::Heartbeat do
     end
   end
 
+  # shareProcessNamespace: true and hostPID: true both leave PID 1 alive across a
+  # restart of the worker container, so the 0.1.2 identifier repeats and an
+  # inherited heartbeat can satisfy a one-shot startupProbe. Neither setting can
+  # be changed on a live pod, so this state is terminal for the volume.
+  describe 'a proven unsupported PID topology' do
+    subject(:unsafe) { described_class.new(dir: dir, max_age: 45, topology: unsafe_topology) }
+
+    let(:previous_container) { described_class.new(dir: dir, max_age: 45, topology: verified_topology('mnt:[1]:100')) }
+
+    it 'rejects ahead of a complete, fresh, inherited heartbeat' do
+      previous_container.declare!(1)
+      previous_container.touch!(0)
+
+      expect(unsafe.check).to eq([false, described_class::UNSUPPORTED_TOPOLOGY])
+    end
+
+    it 'publishes the fail-closed state instead of any generation, mark or count' do
+      unsafe.declare!(1)
+      unsafe.touch!(0)
+
+      expect(Dir.children(dir)).to eq(['topology-unsafe'])
+    end
+
+    it 'writes the reason where a human reading the volume will find it' do
+      unsafe.declare!(1)
+
+      expect(File.read(File.join(dir, 'topology-unsafe'))).to eq(
+        "#{described_class::UNSUPPORTED_TOPOLOGY}\nPID 1 is in mnt:[4026531840], this process in mnt:[4026532686]\n"
+      )
+    end
+  end
+
+  # Procfs access is local to a process and the worker's credentials need not
+  # match the probe's, so the two can prove different things about the same pod.
+  # Proof of an unsafe topology from either side dominates every weaker result.
+  describe 'when the worker and the probe prove different things' do
+    def heartbeat_with(topology) = described_class.new(dir: dir, max_age: 45, topology: topology)
+
+    it 'rejects when only the worker could prove the topology unsafe' do
+      heartbeat_with(unsafe_topology).reject_topology!
+
+      expect(heartbeat_with(unverifiable_topology).check).to eq([false, described_class::UNSUPPORTED_TOPOLOGY])
+    end
+
+    it 'rejects when only the probe could prove the topology unsafe' do
+      worker = heartbeat_with(unverifiable_topology)
+      worker.declare!(1)
+      worker.touch!(0)
+
+      expect(heartbeat_with(unsafe_topology).check).to eq([false, described_class::UNSUPPORTED_TOPOLOGY])
+    end
+
+    it 'rejects published unsafe state even with no generation of its own' do
+      heartbeat_with(unsafe_topology).reject_topology!
+
+      [unavailable_topology, non_linux_topology].each do |topology|
+        expect(heartbeat_with(topology).check).to eq([false, described_class::UNSUPPORTED_TOPOLOGY])
+      end
+    end
+
+    # A fork that could not prove the topology is not evidence that it is safe,
+    # and normal marks published afterwards are not evidence either.
+    it 'is not cleared by a weaker result, whatever it publishes afterwards' do
+      heartbeat_with(unsafe_topology).reject_topology!
+
+      later = heartbeat_with(verified_topology('mnt:[2]:200'))
+      later.declare!(1)
+      later.touch!(0)
+
+      expect(later.check).to eq([false, described_class::UNSUPPORTED_TOPOLOGY])
+      expect(File).to exist(File.join(dir, 'topology-unsafe'))
+    end
+  end
+
   describe '#touch!' do
     it 'writes the time and the pid into the file, for kubectl exec' do
       heartbeat.declare!(1)
@@ -165,7 +239,7 @@ RSpec.describe KicksLiveness::Heartbeat do
   # missing, which any nested KICKS_LIVENESS_DIR hits.
   describe 'a nested marks directory' do
     subject(:nested) do
-      described_class.new(dir: File.join(tmp, 'a', 'b', 'health'), max_age: 45, generation: nil)
+      described_class.new(dir: File.join(tmp, 'a', 'b', 'health'), max_age: 45, topology: non_linux_topology)
     end
 
     it 'creates the whole chain of directories' do
@@ -242,22 +316,6 @@ RSpec.describe KicksLiveness::Heartbeat do
     end
   end
 
-  describe '.container_generation' do
-    it 'combines the mount namespace with PID 1 start time' do
-      fields = ['S', *Array.new(18, '0'), '987654']
-      allow(File).to receive(:readlink).with('/proc/self/ns/mnt').and_return('mnt:[4026533000]')
-      allow(File).to receive(:read).with('/proc/1/stat').and_return("1 (worker main) #{fields.join(' ')}")
-
-      expect(described_class.container_generation).to eq('mnt:[4026533000]:987654')
-    end
-
-    it 'disables the generation guard when procfs is unavailable' do
-      allow(File).to receive(:readlink).with('/proc/self/ns/mnt').and_raise(Errno::ENOENT)
-
-      expect(described_class.container_generation).to be_nil
-    end
-  end
-
   describe '#declare!' do
     # A plain File.write truncates first, and a probe reading in that window
     # finds the file empty and reports that the worker has not started. Every
@@ -276,6 +334,12 @@ RSpec.describe KicksLiveness::Heartbeat do
 
       expect(File.read(File.join(dir, 'expected'))).to eq('2')
       expect(Dir.children(dir)).to eq(['expected'])
+    end
+
+    it 'returns the number of bytes written, as touch! does' do
+      bytes = heartbeat.declare!(2)
+
+      expect(bytes).to eq(File.size(File.join(dir, 'expected')))
     end
   end
 end

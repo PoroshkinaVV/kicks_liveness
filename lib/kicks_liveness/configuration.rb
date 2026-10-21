@@ -3,11 +3,8 @@ require_relative 'heartbeat'
 module KicksLiveness
   # What the application may configure, and what comes from the environment only.
   #
-  # +dir+ and +max_age+ are deliberately read-only here: the probe runs as a
-  # separate process launched by the container runtime and cannot read the
-  # application's initializer. Were they settable in both places, a mismatch
-  # between what the worker writes and what the probe expects would pass
-  # unnoticed.
+  # dir and max_age are environment-only: the separate exec probe cannot read
+  # an application initializer and must resolve the same values as the worker.
   #
   # @see file:docs/SETUP.md#configuration
   # @see file:docs/DESIGN.md#what-is-configurable-and-where
@@ -44,10 +41,8 @@ module KicksLiveness
       @enabled
     end
 
-    # A tick is what the monitor thread sleeps on, so a non-positive value is
-    # not a setting but a broken monitor. An initializer is code, and code
-    # should fail loudly at boot, where the developer is looking. Environment
-    # input is resolved separately by {#environment_tick}, with a safe fallback.
+    # Initializer values fail at boot; environment input uses a safe fallback
+    # through {#environment_tick}.
     #
     # @param seconds [Numeric]
     # @raise [ArgumentError] if not a positive number

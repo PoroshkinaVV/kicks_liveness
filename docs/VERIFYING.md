@@ -35,6 +35,10 @@ spec/integration/verify.sh up      # namespace, broker, worker
 spec/integration/verify.sh down    # deletes the namespace
 ```
 
+Scenarios 11 and 12 are the exception: they need the image and Docker, but no
+cluster and no broker, because both are about the container itself rather than
+about consuming.
+
 Every `kubectl` call names its context and namespace explicitly, so the script
 never falls back to `current-context`. It will still operate on whichever target
 you configure: run `status` and inspect both values before `up` or `down`. The
@@ -101,11 +105,11 @@ expected  generation  worker-0            # in the marks directory
 1 process(es) healthy                     # probe, exit 0
 ```
 
-The hooks fired inside a real ServerEngine fork, which no double can show. On a
-fresh fixture the first attempt also prints `started:`. Do not use that line as
-the sole proof after a same-pod container restart: an inherited unhealthy-run
-counter deliberately suppresses repeated start lines, as described in
-[LIMITATIONS.md](LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn).
+The hooks fired inside a real ServerEngine fork, which no double can show. The
+`started:` line is also valid proof after a same-pod container restart: since
+0.1.3 the respawn counter carries the container generation, so a replacement
+container reports its own first start rather than continuing the previous
+container's unhealthy run.
 
 ### 2. A stale mark
 
@@ -362,10 +366,103 @@ The namespace inode is allowed to be reused, as in the example above; the PID 1
 start time still distinguishes the two incarnations. The test removes its
 container and named volume on exit.
 
+The command also prints the topology it ran under, which for an ordinary
+container is the fully verified one:
+
+```
+generation-restart: topology=verified
+```
+
 This scenario covers the default container-private PID namespace. With
 `shareProcessNamespace: true` or `hostPID: true`, PID 1 survives the worker
-container restart and this guarantee does not hold; see
-[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
+container restart and this guarantee cannot hold — scenario 12 is that case,
+showing both fail-closed rejection when the topology can be proved and the
+degraded outcomes when procfs access cannot prove it.
+
+### 12. Shared and host PID topology outcomes
+
+The four PID topologies, in one command. It needs the fixture image but neither
+Kubernetes nor RabbitMQ, because everything here turns on which PID namespace
+the worker container is in:
+
+```bash
+spec/integration/verify.sh build
+spec/integration/verify.sh topology
+```
+
+Recorded on Linux 6.12 (arm64), Docker 27.4.1, ruby 3.4.10:
+
+```
+shared-pid: topology=unsafe
+shared-pid: 0.1.2 generation before=mnt:[4026532693]:17207878 after=mnt:[4026532693]:17207878
+shared-pid inherited heartbeat: exit=1 unsupported PID topology: pod must not set shareProcessNamespace or hostPID
+shared-pid: marks directory holds expected generation topology-unsafe worker-0
+shared-pid after the worker published: exit=1 unsupported PID topology: pod must not set shareProcessNamespace or hostPID
+host-pid: topology=unsafe
+host-pid: 0.1.2 generation before=mnt:[4026532699]:105 after=mnt:[4026532699]:105
+host-pid inherited heartbeat: exit=1 unsupported PID topology: pod must not set shareProcessNamespace or hostPID
+host-pid: marks directory holds expected generation topology-unsafe worker-0
+host-pid after the worker published: exit=1 unsupported PID topology: pod must not set shareProcessNamespace or hostPID
+private-pid: topology=verified
+private-pid: exit=0 1 process(es) healthy
+unverifiable: topology=unverifiable
+unverifiable: warnings across three fork respawns=1
+unverifiable inherited heartbeat: exit=1 heartbeat belongs to a previous container: worker has not started yet
+unverifiable own heartbeat: exit=0 1 process(es) healthy
+```
+
+Four cases, and each line is the point of one of them.
+
+A separate run on a real Kubernetes v1.25.0 node on Docker Desktop used
+containerd, no `securityContext`, a root worker and the default capability set.
+It produced a different and operationally important table:
+
+| pod topology | PID 1 | PID 1 UID | `/proc/1/ns/mnt` | start time | 0.1.3 state |
+|---|---|---:|---|---:|---|
+| `hostPID: true` | node init | 0 | denied | 0 | `unavailable` |
+| `shareProcessNamespace: true` | pod sandbox | 65535 | denied | 19031096 | `unverifiable` |
+| private PID | container process | 0 | readable | 19031243 | `verified` |
+| shared PID plus `CAP_SYS_PTRACE` | pod sandbox | 65535 | readable | — | `unsafe` |
+
+The Docker matrix proves the fail-closed branch by granting the access it needs;
+the Kubernetes measurement shows that this is not the default result for either
+unsupported setting. The degraded states still warn, but they retain the weaker
+generation or freshness-only guarantees described in LIMITATIONS.md.
+
+**`shared-pid`** joins another container's PID namespace, which is what
+Kubernetes `shareProcessNamespace: true` does — there PID 1 is the pod sandbox.
+**`host-pid`** uses the node's PID namespace, which is `hostPID: true`. In both,
+the run publishes a complete, fresh heartbeat in the **0.1.2 format**, restarts
+only the worker container, and recomputes the 0.1.2 identifier by the 0.1.2
+rule. The `before`/`after` pair is the defect being reproduced rather than
+argued about: both halves repeat, including the mount namespace inode, which the
+kernel handed straight back to the replacement container. A 0.1.2 probe would
+have accepted those inherited marks. The revised probe rejects the topology
+before it ever looks at them, and the worker then adds `topology-unsafe` beside
+the inherited files rather than a heartbeat of its own.
+
+Reading PID 1's namespace link is a ptrace-level operation, so the `host-pid`
+case runs with `CAP_SYS_PTRACE`; without it the link is unreadable and the
+outcome depends on whether a generation can still be derived. Node init on the
+measured Kubernetes node reported start time zero, so that pod was
+`unavailable`. A readable positive start time would instead leave the topology
+`unverifiable`. The fourth case below constructs that latter branch explicitly;
+both are honest limits on what a container can prove about a topology it is not
+allowed to inspect.
+
+**`private-pid`** is the fully verified positive control: an ordinary container,
+owning PID 1, probe green.
+
+**`unverifiable`** is the second positive control, and the one that has to stay
+green: a private-PID container whose checker cannot read `/proc/1/ns/mnt`. The
+0.1.2 generation check is kept in full — a heartbeat from another generation is
+still rejected, its own is still accepted — and the cost is exactly one worker
+warning across three fork respawns, not a probe that is permanently red.
+
+That case is constructed by running the checker as a user other than PID 1's.
+It is **not** a model of a Kubernetes exec probe, which has no user setting of
+its own and normally inherits the container process credentials; it is simply
+the one way to make a namespace link unreadable without a custom procfs mount.
 
 ## What to do with a disagreement
 

@@ -5,6 +5,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-21
+
+### Fixed
+
+- Detect and reject PID topologies in which the container generation cannot
+  identify an incarnation. `shareProcessNamespace: true` and `hostPID: true`
+  leave PID 1 alive across a restart of the worker container, so the 0.1.2
+  identifier can repeat and an inherited fresh heartbeat could satisfy
+  `startupProbe`. Rejection is conditional on a readable `/proc/1/ns/mnt`.
+  Where the comparison can be made, the worker publishes `<dir>/topology-unsafe`
+  instead of a heartbeat and every probe exits 1 with
+  `unsupported PID topology: pod must not set shareProcessNamespace or hostPID`,
+  including one that cannot read the link itself; the state is terminal for the
+  marks volume, and recovery is recreating the pod without those settings.
+  Where it cannot, the previous behavior remains and the worker warns once. The
+  measured outcomes are in `docs/LIMITATIONS.md`.
+- Distinguish a valid zero in PID 1's stat start-time field from a stat line
+  that cannot be parsed: the generation stays unavailable, and the warning
+  names `hostPID` or a virtualized procfs instead of a false parse error.
+- Scope the `attempt-<slot>` respawn counter to the container generation. A
+  replacement container starts its own unhealthy run and cannot escalate over
+  starts it did not take, while respawns within one generation go on sharing a
+  count. Where no generation is available the counter keeps its previous
+  volume-wide behavior.
+
+### Added
+
+- Report a degraded container generation once from the worker, at WARN — once
+  per container incarnation where a generation exists, once per error state
+  where it does not. Neither degraded state adds anything to the probe's
+  output, and the intentional non-Linux fallback stays silent.
+- The marks directory gains two files that appear only when something is
+  wrong: `topology-unsafe`, the terminal fail-closed state, and
+  `topology-report`, the worker's own flag for saying each thing once. Tooling
+  that enumerates the directory should allow for both.
+- Document the boundary of the graceful-shutdown exemption in
+  `docs/LIMITATIONS.md`: a SIGTERM that does not come from a pod deletion can
+  leave a pod Ready with no consumers. Existing behavior, newly documented.
+- Add `spec/integration/verify.sh topology`, a Linux matrix covering a shared
+  PID namespace, the host PID namespace, a verified private-PID container, and
+  a private-PID container whose checker cannot read `/proc/1/ns/mnt`.
+
+### Changed
+
+- `Heartbeat#declare!` documents its actual `Integer` return value.
+- Replace `Heartbeat.container_generation` with `Heartbeat.topology`, returning
+  a structured result instead of a string or `nil`; replace the `Heartbeat.new`
+  keyword `generation:` with `topology:`, accepting that result; and remove
+  `KicksLiveness::GenerationGuard`. All are `@api private`, but callers need
+  updating.
+
 ## [0.1.2] - 2026-09-11
 
 ### Fixed
@@ -73,7 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [docs/](https://github.com/PoroshkinaVV/kicks_liveness/tree/main/docs); start
   with `SETUP.md`, and read `LIMITATIONS.md` before relying on it.
 
-[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/PoroshkinaVV/kicks_liveness/releases/tag/v0.1.0

@@ -14,11 +14,8 @@ module KicksLiveness
     class << self
       # Records a worker as subscribed.
       #
-      # Registering the same object twice would break the size comparison in
-      # {healthy?} and leave the process permanently unhealthy, so identity is
-      # checked first. +equal?+ rather than +==+ on purpose: this is a registry
-      # of objects, and a worker class is free to define equality however it
-      # likes.
+      # Duplicate objects must not inflate the expected-count check. Use identity
+      # rather than == because worker classes can override equality.
       #
       # @param worker [Sneakers::Worker]
       # @return [Array] the registry
@@ -36,16 +33,7 @@ module KicksLiveness
         @mutex.synchronize { @workers.delete(worker) }
       end
 
-      # @return [Integer] how many workers are currently registered
-      def size
-        @mutex.synchronize { @workers.size }
-      end
-
-      # Records that this process is shutting down on purpose.
-      #
-      # Without it a graceful shutdown is indistinguishable from a failure: the
-      # registry empties as each worker unsubscribes, so the monitor would see
-      # an incomplete set and report a genuine fault on every deploy.
+      # Mark deliberate shutdown before unsubscription changes the predicate.
       #
       # @return [true]
       def stopping!

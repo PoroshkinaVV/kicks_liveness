@@ -55,11 +55,16 @@ mark. A fresh mark from the previous container is rejected until every fork in
 the current one has subscribed and published its own mark, so preserving the
 cache cannot make `startupProbe` succeed early.
 
-That guarantee assumes the default container-private PID namespace. Do not set
-`shareProcessNamespace: true` or `hostPID: true` on a pod that relies on it: in
-either topology PID 1 survives a worker-container restart, and the generation
-guard can accept an inherited fresh mark. See
-[LIMITATIONS.md](LIMITATIONS.md#container-generations-require-linux-procfs-and-container-owned-pid-1).
+That guarantee needs the default container-private PID namespace. Do not set
+`shareProcessNamespace: true` or `hostPID: true`: in either topology PID 1
+survives a worker-container restart, so the generation repeats and an inherited
+mark would be accepted. Since 0.1.3 the gem rejects that topology when either
+the worker or probe can read and compare both namespace links. With Kubernetes'
+default capability set those reads failed on the measured node: the shared-PID
+pod was `unverifiable`, and the host-PID pod was `unavailable` because node init
+reported a zero start time. Those states warn and retain the documented degraded
+checks; they do not claim the topology is safe. See
+[LIMITATIONS.md](LIMITATIONS.md#container-generations-need-linux-procfs-and-a-private-pid-namespace).
 
 ## Why the command looks like that
 
@@ -121,9 +126,12 @@ which is not something to rely on in a manifest.
 
 Keep the worker and probe on the same gem version. Since 0.1.2 the heartbeat
 protocol includes a container generation; a newer probe correctly rejects the
-generation-less files written by an older worker. `bundle exec` guarantees that
-both sides resolve from the same bundle. If the faster form below installs a
-second copy in `GEM_HOME`, rebuild that copy on every gem upgrade too.
+generation-less files written by an older worker. Since 0.1.3 it also includes
+the fail-closed topology state, which only a 0.1.3 probe reads: an older probe
+beside a 0.1.3 worker would ignore a proven unsupported PID topology instead of
+failing on it. `bundle exec` guarantees that both sides resolve from the same
+bundle. If the faster form below installs a second copy in `GEM_HOME`, rebuild
+that copy on every gem upgrade too.
 
 ### Where your image puts its gems
 

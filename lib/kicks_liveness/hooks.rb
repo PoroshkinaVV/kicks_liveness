@@ -25,29 +25,17 @@ module KicksLiveness
 
     # Prepended to +Sneakers::WorkerGroup+.
     #
-    # +ServerEngine::Server#create_worker+ calls +w.extend(worker_module)+, so
-    # +WorkerGroup+ lands in the singleton class of the instance rather than
-    # being included in a class. A prepend to the module still sits ahead of it
-    # in that lookup chain; +worker_id+ and +config+ come from
-    # +ServerEngine::Worker+.
+    # ServerEngine extends each worker instance with WorkerGroup. A prepend to
+    # the module still intercepts that singleton-class chain; worker_id and
+    # config come from ServerEngine::Worker.
     #
     # @see file:docs/DESIGN.md#where-the-hooks-attach
     # @api private
     module WorkerGroup
-      # Starts the monitor from +after_fork+ rather than from +run+.
-      #
-      # +Sneakers::WorkerGroup#run+ calls +after_fork+ as its very first
-      # statement and only afterwards resolves +worker_classes+, so this is the
-      # earliest point in the fork at which the application's own +after_fork+
-      # hook has already run. That ordering matters because resolving the
-      # expected consumer count may run application code: under
-      # sneakers:active_job the set is a callable registry, and the standard use
-      # of +after_fork+ is to re-establish the connections a fork inherited.
-      # Resolving it first would run that code against a fork that is not ready.
-      #
-      # Wrapped in a rescue: instrumentation has no right to prevent a worker
-      # from starting, so the worst outcome is a missing mark and a pod restart
-      # rather than a pod that stays up with silent queues.
+      # Run after the application's after_fork restores inherited connections.
+      # Resolving callable worker_classes earlier could run application code before
+      # those connections are ready. Rescue startup errors so instrumentation
+      # cannot prevent the worker itself from starting.
       #
       # @return [void]
       def after_fork
@@ -64,13 +52,8 @@ module KicksLiveness
         end
       end
 
-      # Marks the shutdown as deliberate before the workers unsubscribe.
-      #
-      # +Sneakers::WorkerGroup#stop+ calls +stop+ on each worker, and
-      # +Sneakers::Worker#stop+ waits for the thread pool to drain, which takes
-      # as long as the longest in-flight job. The registry empties at the start
-      # of that, so without this flag the monitor would report a fault on every
-      # ordinary deploy.
+      # Set the flag before any worker unsubscribes or starts draining, so the
+      # monitor does not treat deliberate removal as a consumer failure.
       #
       # @return [void]
       def stop
@@ -91,9 +74,8 @@ module KicksLiveness
         nil
       end
 
-      # The same set the worker gem itself builds its workers from, so the
-      # queue list is never duplicated and cannot drift. An array of classes
-      # under sneakers:run, a callable registry under sneakers:active_job.
+      # Use the worker gem's own set: an array for sneakers:run, a callable registry
+      # for sneakers:active_job. This must run after the application's after_fork.
       def kicks_liveness_expected_consumers
         classes = config[:worker_classes]
         classes = classes.call if classes.respond_to?(:call)

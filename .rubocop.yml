@@ -23,6 +23,17 @@ Layout/LineLength:
 Metrics/MethodLength:
   Max: 30
 
+# Two classes are deliberately longer than the default, and neither can be
+# split without losing something real. Heartbeat is the whole filesystem
+# contract in the one file the probe is allowed to load, so moving a part of it
+# out would cost the probe a require. Monitor is a single tick loop with the
+# logging rules that go with it, and a decision split across two files is
+# harder to follow than a long one in a single place.
+Metrics/ClassLength:
+  Exclude:
+    - 'lib/kicks_liveness/heartbeat.rb'
+    - 'lib/kicks_liveness/monitor.rb'
+
 RSpec/MultipleExpectations:
   Max: 5
 

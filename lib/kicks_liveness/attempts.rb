@@ -3,23 +3,18 @@ require 'fileutils'
 module KicksLiveness
   # Counts starts of a supervisor slot that have not reached healthy yet.
   #
-  # Deliberately separate from {Heartbeat}. Heartbeat is the contract shared
-  # with the probe and is loaded by it alone, so nothing the probe does not need
-  # belongs there — including the +fileutils+ this class requires freely.
+  # Persistent state survives fork respawns; its generation separates container
+  # incarnations when available. Kept outside {Heartbeat} because the probe does
+  # not read these counters.
   #
-  # The count lives in the marks directory rather than in memory because a
-  # respawn storm destroys process state every few hundred milliseconds: the
-  # supervisor brings a failing fork back after +start_worker_delay+, and every
-  # incarnation of the monitor believes it is the first. That is how an outage
-  # can produce thousands of identical INFO lines and not one ERROR. The
-  # directory is the only state that survives the fork.
-  #
-  # @see file:docs/DESIGN.md#logging-events-not-the-pulse
+  # @see file:docs/LIMITATIONS.md#a-respawn-loop-is-reported-once-per-grace-window-not-once-per-respawn
   # @api private
   class Attempts
     # @param dir [String] marks directory
-    def initialize(dir)
+    # @param generation [String, nil] container incarnation the count belongs to
+    def initialize(dir, generation: nil)
       @dir = dir
+      @generation = generation
     end
 
     # Records a start of this slot.
@@ -62,13 +57,21 @@ module KicksLiveness
       File.join(@dir, "attempt-#{slot}")
     end
 
-    # A missing or unreadable counter means "no previous start", never an
-    # exception: this is instrumentation, and it may not break a worker.
+    # Missing, unreadable, or foreign-generation counts start a new run.
+    # Counter failures must not prevent worker startup.
     def read(slot)
-      count, epoch = File.read(path(slot)).split
+      count, epoch, generation = File.read(path(slot)).split
+      return [0, nil] unless same_generation?(generation)
+
       [Integer(count), Time.at(Integer(epoch)).utc]
     rescue StandardError
       [0, nil]
+    end
+
+    def same_generation?(declared)
+      return true unless @generation
+
+      declared == "generation=#{@generation}"
     end
 
     # Failing to write degrades the reporting back to one line per respawn,
@@ -76,8 +79,10 @@ module KicksLiveness
     # rather than escalated.
     def write(slot, count, first)
       FileUtils.mkdir_p(@dir)
+      contents = "#{count} #{first.to_i}"
+      contents = "#{contents} generation=#{@generation}" if @generation
       tmp = "#{path(slot)}.#{Process.pid}"
-      File.write(tmp, "#{count} #{first.to_i}\n")
+      File.write(tmp, "#{contents}\n")
       File.rename(tmp, path(slot))
     rescue StandardError
       nil

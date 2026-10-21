@@ -96,11 +96,11 @@ RSpec.describe KicksLiveness::Registry do
   describe '.add' do
     # A duplicate breaks the size comparison in .healthy? and would leave the
     # process permanently unhealthy.
-    it 'does not register the same worker twice' do
+    it 'does not count a duplicate as a second subscriber' do
       described_class.add(worker)
       described_class.add(worker)
 
-      expect(described_class.size).to eq(1)
+      expect(described_class.healthy?(2)).to be(false)
     end
 
     it 'keeps the predicate truthful after a duplicate' do
@@ -114,9 +114,11 @@ RSpec.describe KicksLiveness::Registry do
   describe '.remove' do
     it 'drops the worker from the registry' do
       described_class.add(worker)
+      expect(described_class.healthy?(1)).to be(true)
+
       described_class.remove(worker)
 
-      expect(described_class.size).to eq(0)
+      expect(described_class.healthy?(1)).to be(false)
     end
   end
 end
