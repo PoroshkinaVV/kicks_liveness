@@ -3,11 +3,27 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish (for example, v0.1.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   validate:
     name: Validate tag
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -18,17 +34,33 @@ jobs:
           ruby-version: '3.4'
 
       - name: Tag matches gem version and belongs to main
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          case "$RELEASE_TAG" in
+            v?*) ;;
+            *) echo 'Release tag must start with v'; exit 1 ;;
+          esac
+          commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$commit" != "$(git rev-parse "${GITHUB_SHA}^{commit}")" ]; then
+            echo 'Release tag no longer matches the triggering commit'
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "tag $RELEASE_TAG does not point to a commit on main"
+            exit 1
+          fi
+          git checkout --detach "$commit"
+          tag="${RELEASE_TAG#v}"
           version="$(ruby -Ilib -r kicks_liveness/version -e 'print KicksLiveness::VERSION')"
           if [ "$tag" != "$version" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match KicksLiveness::VERSION ${version}"
+            echo "tag $RELEASE_TAG does not match KicksLiveness::VERSION $version"
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "tag ${GITHUB_REF_NAME} does not point to a commit on main"
-            exit 1
-          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   gate:
     name: gate (ruby ${{ matrix.ruby }}, ${{ matrix.appraisal }})
@@ -50,6 +82,8 @@ jobs:
       BUNDLE_GEMFILE: gemfiles/${{ matrix.appraisal }}.gemfile
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -61,10 +95,12 @@ jobs:
 
   package:
     name: Package smoke test
-    needs: gate
+    needs: [validate, gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -82,22 +118,45 @@ jobs:
 
   push:
     name: Push gem to RubyGems.org
-    needs: package
+    needs: [validate, package]
     runs-on: ubuntu-latest
 
     # Must match the trusted publisher's Environment field on RubyGems.org.
     environment: release
 
     permissions:
-      contents: write
+      contents: read
       id-token: write
+
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
 
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
           bundler-cache: true
           cache-version: kicks
-      - uses: rubygems/release-gem@v1
+
+      # Keep build, signing and push in separate processes: release-gem's
+      # RUBYOPT preload activates default OpenSSL before Bundler (#28).
+      - run: bundle exec rake build
+
+      - name: Sign the release gem
+        run: |
+          gem_file="pkg/kicks_liveness-${RELEASE_VERSION}.gem"
+          gem exec sigstore-cli:0.2.3 sign "$gem_file" --bundle "$gem_file.sigstore.json"
+
+      - uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+
+      - name: Push the signed gem
+        run: |
+          gem_file="pkg/kicks_liveness-${RELEASE_VERSION}.gem"
+          gem push "$gem_file" --attestation "$gem_file.sigstore.json"
+
+      - name: Wait for release to propagate
+        run: gem exec rubygems-await "pkg/kicks_liveness-${RELEASE_VERSION}.gem"

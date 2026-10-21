@@ -80,6 +80,26 @@ jobs:
 
       - run: bundle exec rubocop
 
+  release:
+    name: Release commands (no publish)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          cache-version: kicks
+
+      - run: bundle exec rake build
+      - name: Signing and push commands load without release credentials
+        run: |
+          gem exec sigstore-cli:0.2.3 help sign
+          gem push --help | ruby -e 'abort "RubyGems lacks attestation support" unless STDIN.read.include?("--attestation FILE")'
+
   yard:
     # The gemspec's `documentation_uri` points at rubydoc.info, which rebuilds
     # from `.yardopts` when the gem is pushed, so a broken page ships silently.
