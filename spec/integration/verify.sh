@@ -7,7 +7,8 @@ set -euo pipefail
 CONTEXT="${KICKS_LIVENESS_K8S_CONTEXT:-docker-desktop}"
 NAMESPACE="${KICKS_LIVENESS_K8S_NAMESPACE:-kicks-liveness}"
 WORKER_GEM="${AMQP_WORKER_GEM:-kicks}"
-IMAGE=kicks-liveness-fixture:latest
+IMAGE="${KICKS_LIVENESS_IMAGE:-kicks-liveness-fixture:latest}"
+RABBITMQ_IMAGE="${KICKS_LIVENESS_RABBITMQ_IMAGE:-rabbitmq:3-management}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 K8S="$ROOT/spec/integration/k8s"
 MANAGED_BY_LABEL=app.kubernetes.io/managed-by
@@ -81,8 +82,9 @@ cmd_up() {
   fi
 
   kube apply -f "$K8S/rabbitmq.yaml"
+  kube set image deploy/rabbitmq "rabbitmq=$RABBITMQ_IMAGE"
   kube rollout status deploy/rabbitmq --timeout=300s
-  kube apply -f "$K8S/worker.yaml"
+  kube set image --local -f "$K8S/worker.yaml" "worker=$IMAGE" -o yaml | kube apply -f -
   if "$reuse_namespace"; then
     # The image uses a local, mutable `latest` tag. Recreate the pod so a build
     # for the other worker gem cannot leave the previous image running.
@@ -421,6 +423,12 @@ cmd_marks() { guard; kube exec deploy/worker -- ls -l /opt/app/tmp/health/; }
 cmd_logs()  { guard; kube logs deploy/worker --tail="${1:-50}"; }
 cmd_ui()    { guard; kube port-forward deploy/rabbitmq 15672:15672; }
 
+cmd_lifecycle() {
+  guard
+  require_managed_namespace
+  ruby "$ROOT/spec/integration/lifecycle.rb" "$1" "$CONTEXT" "$NAMESPACE"
+}
+
 case "${1:-}" in
   build) cmd_build ;;
   up) cmd_up ;;
@@ -428,12 +436,14 @@ case "${1:-}" in
   probe) cmd_probe ;;
   generation-restart) cmd_generation_restart ;;
   topology) cmd_topology ;;
+  shutdown) cmd_lifecycle shutdown ;;
+  container-restart) cmd_lifecycle container-restart ;;
   marks) cmd_marks ;;
   logs) shift; cmd_logs "${1:-50}" ;;
   ui) cmd_ui ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 {build|up|down|probe|generation-restart|topology|marks|logs [n]|ui|status}" >&2
+    echo "usage: $0 {build|up|down|probe|generation-restart|topology|shutdown|container-restart|marks|logs [n]|ui|status}" >&2
     exit 64
     ;;
 esac

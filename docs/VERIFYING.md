@@ -35,15 +35,31 @@ spec/integration/verify.sh up      # namespace, broker, worker
 spec/integration/verify.sh down    # deletes the namespace
 ```
 
-Scenarios 11 and 12 are the exception: they need the image and Docker, but no
-cluster and no broker, because both are about the container itself rather than
-about consuming.
+The Docker form of scenario 11 and scenario 12 need no cluster or broker.
 
 Every `kubectl` call names its context and namespace explicitly, so the script
 never falls back to `current-context`. It will still operate on whichever target
 you configure: run `status` and inspect both values before `up` or `down`. The
 script labels namespaces it creates and refuses to apply to or delete an
 existing namespace without that ownership label.
+
+For another local cluster, export `KICKS_LIVENESS_K8S_CONTEXT` and
+`KICKS_LIVENESS_DOCKER_CONTEXT` before building. `KICKS_LIVENESS_K8S_NAMESPACE`
+selects the disposable namespace; `KICKS_LIVENESS_IMAGE` and
+`KICKS_LIVENESS_RABBITMQ_IMAGE` select local worker and broker images.
+Run the direct recipes below from the repository root with this guarded helper:
+
+```bash
+export KICKS_LIVENESS_K8S_CONTEXT="${KICKS_LIVENESS_K8S_CONTEXT:-docker-desktop}"
+export KICKS_LIVENESS_K8S_NAMESPACE="${KICKS_LIVENESS_K8S_NAMESPACE:-kicks-liveness}"
+k() {
+  local owner
+  owner="$(kubectl --context "$KICKS_LIVENESS_K8S_CONTEXT" get namespace \
+    "$KICKS_LIVENESS_K8S_NAMESPACE" -o 'jsonpath={.metadata.labels.app\.kubernetes\.io/managed-by}')" || return
+  [ "$owner" = kicks-liveness-fixture ] || { echo 'not a fixture namespace' >&2; return 1; }
+  kubectl --context "$KICKS_LIVENESS_K8S_CONTEXT" --namespace "$KICKS_LIVENESS_K8S_NAMESPACE" "$@"
+}
+```
 
 The default image uses Kicks. Build it with Sneakers instead without editing the
 fixture:
@@ -117,6 +133,14 @@ The recipe from KUBERNETES.md. Proves the probe's threshold and the
 self-repair, and nothing else — the mark is fixed on the next tick, well inside
 `failureThreshold`, so the container is never killed.
 
+```bash
+pod="$(k get pods -l app=worker -o jsonpath='{.items[0].metadata.name}')"
+k exec "$pod" -- touch -d '120 seconds ago' /opt/app/tmp/health/worker-0
+spec/integration/verify.sh probe  # both commands print stale and exit=1
+sleep 12
+spec/integration/verify.sh probe  # both commands print healthy and exit=0
+```
+
 Worth running through **both** commands here, since this is the one scenario
 where the probe is supposed to answer `1`. `spec/integration/verify.sh probe`
 does exactly that: the standard `bundle exec kicks-liveness` and the optimised
@@ -132,7 +156,9 @@ worker-0 stale 120s > 45s   # exit 1
 The one that matters. Delete a queue the worker consumes from:
 
 ```bash
-kubectl exec deploy/rabbitmq -- rabbitmqctl delete_queue kicks_liveness.alpha
+k exec deploy/rabbitmq -- rabbitmqctl delete_queue kicks_liveness.alpha
+k get pods -l app=worker -w  # watch RESTARTS increase; Ctrl-C after recovery
+spec/integration/verify.sh probe  # exit=0 after the worker re-declares the queue
 ```
 
 Observed, from the moment of deletion:
@@ -166,7 +192,10 @@ not in the pod log. An exec probe's stdout goes nowhere else, which is why
 ### 4. The broker dies
 
 ```bash
-kubectl delete pod -l app=rabbitmq --grace-period=0 --force
+k delete pod -l app=rabbitmq --grace-period=0 --force
+k rollout status deploy/rabbitmq --timeout=300s  # the Deployment recreates it
+spec/integration/verify.sh logs 100
+spec/integration/verify.sh probe
 ```
 
 The pod must **not** restart. "It survived" is not enough on its own — a broker
@@ -186,7 +215,16 @@ consumers back on its own.
 
 ### 5. The broker stays dead
 
-`kubectl scale deploy/rabbitmq --replicas=0`, then wait. Observed over 319 s
+```bash
+k scale deploy/rabbitmq --replicas=0
+sleep 150  # longer than max_age + periodSeconds * failureThreshold
+spec/integration/verify.sh probe  # still exit=0 during Bunny recovery
+k get pods -l app=worker  # RESTARTS must not increase
+k scale deploy/rabbitmq --replicas=1  # restore, including after an interrupted check
+k rollout status deploy/rabbitmq --timeout=300s
+```
+
+With the broker scaled to zero, observed over 319 s
 — seven times `max_age`, more than twice the 135 s steady-state budget — the
 mark's age never exceeded 9 s and `restartCount` stayed 0. The monitor kept
 writing, because `recovering_from_network_failure?` never stops being true:
@@ -232,13 +270,41 @@ bundle exec rspec spec/kicks_liveness/configuration_spec.rb \
 ```
 
 The probe spec launches a separate Ruby process against the monitor's marks.
-These checks exercise the local contract; a real stuck drain and an ordinary
-rollout still need verification against the cluster's worker and broker.
+For the real worker and broker, run:
+
+```bash
+spec/integration/verify.sh shutdown
+```
+
+This temporarily uses `tick=1`, `max_age=3`, `shutdown_grace=10` and pod
+termination grace 10 seconds, then restores the original deployment even on
+failure. First it rolls out a worker during an eight-second job and requires
+the job to finish, a shutdown tick to run, and no liveness ERROR. Then it blocks
+a real pool drain, sends SIGTERM without deleting the pod, removes the remaining
+idle consumer, and checks zero consumers, an initially healthy probe, one expiry
+ERROR, an unchanged mark, a stale probe, and a kubelet restart restoring both
+consumers. It releases the blocking job during recovery.
+
+Recorded on 2026-10-21 with 0.1.4: both paths passed on OrbStack Kubernetes
+v1.30.7+orb1, Linux arm64 6.12.10-orbstack-00297-gf8f6e015b993, Docker 27.4.1,
+Ruby 3.4.10, Kicks 3.4.0 and Bunny 3.3.0. The stuck pod's `restartCount` changed
+from 0 to 1. Network access prevented a clean image build; the tested image used
+the existing native-arm64 fixture layer with the current gem and fixture copied
+in, rebuilt and installed offline. This is not a claim that a clean build passed.
 
 ### 7. Bad broker credentials
 
 Point `AMQP_URL` at a wrong password. The fork cannot subscribe, so the
 supervisor respawns it every `start_worker_delay`, forever. Over 120 s:
+
+```bash
+amqp="$(k get deploy worker -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="AMQP_URL")].value}')"
+k set env deploy/worker AMQP_URL=amqp://guest:wrong@rabbitmq:5672
+sleep 120
+spec/integration/verify.sh logs 30000 | grep liveness
+k set env deploy/worker "AMQP_URL=$amqp"  # restore even if the check fails
+k rollout status deploy/worker --timeout=300s
+```
 
 | | lines |
 |---|---|
@@ -271,6 +337,18 @@ find them.
 `WORKER_COUNT=2` needs no rebuild; the rake task turns it into
 `config[:workers]`.
 
+```bash
+k set env deploy/worker WORKER_COUNT=2
+k rollout status deploy/worker --timeout=300s
+spec/integration/verify.sh probe  # 2 process(es) healthy
+pod="$(k get pods -l app=worker -o jsonpath='{.items[0].metadata.name}')"
+k exec "$pod" -- touch -d '120 seconds ago' /opt/app/tmp/health/worker-1
+spec/integration/verify.sh probe  # worker-1 alone makes it fail
+sleep 12  # the monitor repairs the mark
+k set env deploy/worker WORKER_COUNT=1
+k rollout status deploy/worker --timeout=300s
+```
+
 ```
 INFO: [liveness] slot 0: started: ... processes=2 consumers=2
 INFO: [liveness] slot 1: started: ... processes=2 consumers=2
@@ -291,6 +369,17 @@ Scenario 6 kills a pod outright. A deploy is the more interesting case,
 because KUBERNETES.md claims the startup probe *incidentally fixes rollouts
 where the old pod was removed before the new one had subscribed* — and that
 claim is about ordering, which needs two pods to be watched at once.
+
+```bash
+k set env deploy/worker WORKER_COUNT=2
+k rollout status deploy/worker --timeout=300s
+# In a second shell with the same exports and helper, watch until rollout completes:
+# while true; do k exec deploy/rabbitmq -- rabbitmqctl -q list_queues name consumers; sleep 1; done
+k rollout restart deploy/worker
+k rollout status deploy/worker --timeout=300s
+k set env deploy/worker WORKER_COUNT=1  # restore; stop the watcher with Ctrl-C
+k rollout status deploy/worker --timeout=300s
+```
 
 `kubectl rollout restart deploy/worker`, with `WORKER_COUNT=2`, so a fully
 subscribed pod is worth two consumers per queue. Counting consumers on the
@@ -322,14 +411,14 @@ treatment as everything else here. The broker in this fixture is enough to check
 it; the plugin is not on by default:
 
 ```bash
-kubectl exec deploy/rabbitmq -- rabbitmq-plugins enable rabbitmq_prometheus
+k exec deploy/rabbitmq -- rabbitmq-plugins enable rabbitmq_prometheus
 ```
 
 Then read all three endpoints from the worker pod, which has a Ruby but no
 `curl`:
 
 ```bash
-kubectl exec deploy/worker -- ruby -rnet/http -e \
+k exec deploy/worker -- ruby -rnet/http -e \
   'puts Net::HTTP.get(URI("http://rabbitmq:15692/metrics/detailed?family=queue_consumer_count"))'
 ```
 
@@ -347,6 +436,15 @@ metric is a *different* name from the aggregate, the detailed endpoint needs the
 
 Then check the two halves of the alert against a throwaway queue — declare one
 with no consumers, scrape, delete it, scrape again:
+
+```bash
+k exec deploy/worker -- bundle exec ruby -rbunny -e \
+  'c = Bunny.new(ENV.fetch("AMQP_URL")).start; c.create_channel.queue("kicks_liveness.tmpcheck"); c.close'
+# Repeat the scrape above: tmpcheck must have a zero-consumer series.
+k exec deploy/rabbitmq -- rabbitmqctl delete_queue kicks_liveness.tmpcheck
+# Repeat the scrape: tmpcheck must have no series, not a zero.
+k exec deploy/rabbitmq -- rabbitmq-plugins disable rabbitmq_prometheus  # restore
+```
 
 ```
 -- queue exists, zero consumers
@@ -402,6 +500,22 @@ This scenario covers the default container-private PID namespace. With
 container restart and this guarantee cannot hold — scenario 12 is that case,
 showing both fail-closed rejection when the topology can be proved and the
 degraded outcomes when procfs access cannot prove it.
+
+The Kubernetes counterpart also leaves `attempt-0` in the pod's `emptyDir`:
+
+```bash
+spec/integration/verify.sh container-restart
+```
+
+It makes PID 1 exit itself through a fixture-only WINCH handler, not an ignored
+in-namespace SIGKILL or ServerEngine's USR2 reload. It requires the same pod,
+an increased `restartCount`, exit 137, a surviving volume witness, a changed
+generation, one replacement `started:` line without inherited escalation, and
+a healthy probe; the original deployment is restored afterwards. On the
+environment recorded in scenario 6, all checks passed with `restartCount=0->1`.
+The Docker form was also rerun: PID 1 start time changed from 1515589 to 1515784
+with mount namespace inode 4026534862 unchanged; inherited marks were rejected
+until the delayed replacement writer published.
 
 ### 12. Shared and host PID topology outcomes
 
