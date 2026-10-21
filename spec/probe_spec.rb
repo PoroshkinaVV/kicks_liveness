@@ -6,6 +6,11 @@ RSpec.describe 'liveness probe' do
   let(:dir) { File.join(tmp, 'health') }
   let(:lib) { File.expand_path('../lib', __dir__) }
 
+  def not_started_message
+    "no #{File.join(dir, 'expected')}: worker has not started yet " \
+      '(is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)'
+  end
+
   after { FileUtils.remove_entry(tmp) }
 
   def run_probe(require_path: 'kicks_liveness/probe', env: {})
@@ -45,7 +50,26 @@ RSpec.describe 'liveness probe' do
   end
 
   it 'exits one and prints the reason when the worker has not started' do
-    expect(run_probe).to eq(["no #{File.join(dir, 'expected')}: worker has not started yet", 1])
+    expect(run_probe).to eq([not_started_message, 1])
+  end
+
+  it 'prints the hint without loading RubyGems or the application' do
+    expect(run_probe(env: { 'RUBYOPT' => '--disable-gems' })).to eq([not_started_message, 1])
+  end
+
+  it 'prints the same hint after the marks directory is removed without recreating it' do
+    healthy_marks!
+    FileUtils.remove_entry(dir)
+
+    expect(run_probe).to eq([not_started_message, 1])
+    expect(Dir).not_to exist(dir)
+  end
+
+  it 'still exits one with the hint when only expected is missing and the marks are fresh' do
+    healthy_marks!
+    File.unlink(File.join(dir, 'expected'))
+
+    expect(run_probe).to eq([not_started_message, 1])
   end
 
   it 'pulls in no bundler and requires neither kicks nor sneakers' do

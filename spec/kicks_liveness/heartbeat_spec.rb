@@ -6,14 +6,17 @@ RSpec.describe KicksLiveness::Heartbeat do
   let(:tmp) { Dir.mktmpdir }
   let(:dir) { File.join(tmp, 'health') }
 
+  def not_started_message
+    "no #{File.join(dir, 'expected')}: worker has not started yet " \
+      '(is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)'
+  end
+
   after { FileUtils.remove_entry(tmp) }
 
   describe '#check' do
     it 'fails until the worker has declared its slot count' do
-      ok, message = heartbeat.check
-
-      expect(ok).to be(false)
-      expect(message).to include('worker has not started yet')
+      expect(heartbeat.check).to eq([false, not_started_message])
+      expect(Dir).not_to exist(dir)
     end
 
     it 'fails until every slot has marked itself' do
@@ -221,7 +224,7 @@ RSpec.describe KicksLiveness::Heartbeat do
       FileUtils.remove_entry(dir)
       heartbeat.touch!(0)
 
-      expect(heartbeat.check).to eq([false, "no #{File.join(dir, 'expected')}: worker has not started yet"])
+      expect(heartbeat.check).to eq([false, not_started_message])
     end
 
     it 'passes once expected is declared again' do

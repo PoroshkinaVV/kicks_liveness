@@ -3,6 +3,7 @@
 require 'json'
 require 'open3'
 require 'timeout'
+require_relative '../../lib/kicks_liveness/version'
 
 class Lifecycle # rubocop:disable Metrics/ClassLength -- One disposable fixture and its recovery paths.
   def initialize(context, namespace)
@@ -127,7 +128,8 @@ class Lifecycle # rubocop:disable Metrics/ClassLength -- One disposable fixture 
       JSON.parse(kube('get', 'pods', '-l', 'app=worker', '-o', 'json')).fetch('items').size == 1
     end
     version = exec(worker_pod, 'bundle', 'exec', 'ruby', '-rkicks_liveness', '-e', 'print KicksLiveness::VERSION')
-    assert(version == '0.1.4', "fixture runs #{version}, not the 0.1.4 source under test")
+    expected = KicksLiveness::VERSION
+    assert(version == expected, "fixture runs #{version}, not the #{expected} source under test")
     puts 'fixture: tick=1s max_age=3s shutdown_grace=10s terminationGracePeriodSeconds=10'
   end
 
@@ -154,18 +156,33 @@ class Lifecycle # rubocop:disable Metrics/ClassLength -- One disposable fixture 
     errors&.close
   end
 
+  # Hold the job until the old pod is draining: SIGTERM arrives only after the
+  # replacement is Ready, which can take longer than any fixed job duration.
   def ordinary_drain
     pod = worker_pod
-    publish(pod, 'delay-drain')
+    exec(pod, 'rm', '-f', '/opt/app/tmp/release-drain')
+    publish(pod, 'block-drain')
     logs = capture_logs(pod) do
       kube('rollout', 'restart', 'deploy/worker')
+      wait_until('rollout shutdown tick', 120) { kube('logs', pod).include?('shutting down: consumers are no longer checked') }
+      exec(pod, 'touch', '/opt/app/tmp/release-drain')
       kube('rollout', 'status', 'deploy/worker', '--timeout=120s')
     end
-    assert(logs.include?('[alpha] delay-drain complete'), 'rollout interrupted the in-flight job')
+    assert(logs.include?('[alpha] block-drain released'), 'rollout interrupted the in-flight job')
     assert(logs.include?('shutting down: consumers are no longer checked'), 'rollout never exercised a draining tick')
     assert(!logs.match?(/ERROR.*\[liveness\]/), 'ordinary drain emitted a liveness ERROR')
     assert(probe(worker_pod).last.zero?, 'rollout replacement is unhealthy')
     puts 'ordinary-drain: in-flight job completed; shutdown tick observed; no liveness ERROR; replacement probe exit=0'
+  ensure
+    release_drains
+  end
+
+  # A failed run can leave the held message unacknowledged, and the broker then
+  # redelivers it to the replacement pod, whose emptyDir has no release file.
+  def release_drains
+    JSON.parse(kube('get', 'pods', '-l', 'app=worker', '-o', 'json')).fetch('items').each do |item|
+      command('exec', item.dig('metadata', 'name'), '--', 'touch', '/opt/app/tmp/release-drain', checked: false)
+    end
   end
 
   def mark_time(pod)

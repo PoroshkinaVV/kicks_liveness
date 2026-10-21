@@ -278,30 +278,34 @@ spec/integration/verify.sh shutdown
 
 This temporarily uses `tick=1`, `max_age=3`, `shutdown_grace=10` and pod
 termination grace 10 seconds, then restores the original deployment even on
-failure. First it rolls out a worker during an eight-second job and requires
-the job to finish, a shutdown tick to run, and no liveness ERROR. Then it blocks
-a real pool drain, sends SIGTERM without deleting the pod, removes the remaining
-idle consumer, and checks zero consumers, an initially healthy probe, one expiry
-ERROR, an unchanged mark, a stale probe, and a kubelet restart restoring both
-consumers. It releases the blocking job during recovery.
+failure. First it holds a job, rolls out a worker, releases the job only after
+the old pod's first shutdown tick, and requires the job to finish and no
+liveness ERROR; how long the replacement takes to become Ready does not matter.
+Then it blocks a real pool drain, sends SIGTERM without deleting the pod,
+removes the remaining idle consumer, and checks zero consumers, an initially
+healthy probe, one expiry ERROR, an unchanged mark, a stale probe, and a kubelet
+restart restoring both consumers. It releases the blocking job during recovery.
 
 Recorded on 2026-10-21 with 0.1.4: both paths passed on OrbStack Kubernetes
 v1.30.7+orb1, Linux arm64 6.12.10-orbstack-00297-gf8f6e015b993, Docker 27.4.1,
-Ruby 3.4.10, Kicks 3.4.0 and Bunny 3.3.0. The stuck pod's `restartCount` changed
-from 0 to 1. Network access prevented a clean image build; the tested image used
-the existing native-arm64 fixture layer with the current gem and fixture copied
-in, rebuilt and installed offline. This is not a claim that a clean build passed.
+Ruby 3.4.11, Kicks 3.4.0, Bunny 3.4.0 and the openssl gem 4.0.2, using an image
+built with `--no-cache --pull`. The stuck pod's `restartCount` changed from 0
+to 1.
 
 ### 7. Bad broker credentials
 
 Point `AMQP_URL` at a wrong password. The fork cannot subscribe, so the
-supervisor respawns it every `start_worker_delay`, forever. Over 120 s:
+supervisor respawns it every `start_worker_delay`, forever. The new pod never
+passes its startup probe, so the rollout keeps the old healthy pod running and
+`deploy/worker` may resolve to either one; read the newest pod by name. Over
+120 s:
 
 ```bash
 amqp="$(k get deploy worker -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="AMQP_URL")].value}')"
 k set env deploy/worker AMQP_URL=amqp://guest:wrong@rabbitmq:5672
 sleep 120
-spec/integration/verify.sh logs 30000 | grep liveness
+new="$(k get pods -l app=worker --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+k logs "$new" --tail=30000 | grep liveness
 k set env deploy/worker "AMQP_URL=$amqp"  # restore even if the check fails
 k rollout status deploy/worker --timeout=300s
 ```

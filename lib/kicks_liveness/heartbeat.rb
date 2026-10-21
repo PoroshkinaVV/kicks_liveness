@@ -294,7 +294,13 @@ module KicksLiveness
       return [false, UNSUPPORTED_TOPOLOGY] if unsupported_topology?
 
       processes = expected
-      return [false, "no #{expected_path}: worker has not started yet"] unless processes&.positive?
+      unless processes&.positive?
+        return [
+          false,
+          "no #{expected_path}: worker has not started yet " \
+          '(is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)'
+        ]
+      end
       return [false, 'heartbeat belongs to a previous container: worker has not started yet'] unless current_generation?
 
       problems = (0...processes).filter_map { |slot| problem_for(slot, now) }

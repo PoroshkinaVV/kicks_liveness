@@ -145,11 +145,17 @@ image. One line, no cluster needed:
 docker run --rm your-image ruby -e "require 'kicks_liveness/probe'"
 ```
 
-A line like `no /opt/app/tmp/health/expected: worker has not started yet` and
-exit 1 means the plain command works — the probe found itself and correctly
-reported that no worker is running. A `LoadError` means it does not: keep
-`bundle exec kicks-liveness`, or use the explicit-path optimisation below. Do
-not put the plain command in a manifest without this check: its failure mode is
+With no worker running, exit 1 and the following line mean the plain command
+works — the probe loaded and found no declared worker count:
+
+```
+no /opt/app/tmp/health/expected: worker has not started yet (is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)
+```
+
+The question is a [setup hint](SETUP.md#checking-that-the-hooks-are-in-place),
+not proof of missing installation. A `LoadError` means the command does not
+work: keep `bundle exec kicks-liveness`, or use the explicit-path optimisation
+below. Do not put the plain command in a manifest without this check: its failure mode is
 a pod that never passes `startupProbe` and lands in `CrashLoopBackOff`.
 
 What decides it is whether Bundler installed into `GEM_HOME` or somewhere of

@@ -84,7 +84,10 @@ cmd_up() {
   kube apply -f "$K8S/rabbitmq.yaml"
   kube set image deploy/rabbitmq "rabbitmq=$RABBITMQ_IMAGE"
   kube rollout status deploy/rabbitmq --timeout=300s
-  kube set image --local -f "$K8S/worker.yaml" "worker=$IMAGE" -o yaml | kube apply -f -
+  # Not `set image --local | apply`: kubectl prints nothing for an unchanged
+  # image, so the default image would leave apply with no objects.
+  kube apply -f "$K8S/worker.yaml"
+  kube set image deploy/worker "worker=$IMAGE"
   if "$reuse_namespace"; then
     # The image uses a local, mutable `latest` tag. Recreate the pod so a build
     # for the other worker gem cannot leave the previous image running.

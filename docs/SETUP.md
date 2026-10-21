@@ -178,6 +178,16 @@ Sneakers::WorkerGroup.ancestors.include?(KicksLiveness::Hooks::WorkerGroup) # =>
 Both must be `true` before the runner starts. If either is `false`, either
 `install!` has not run, or it ran before `kicks`/`sneakers` was loaded.
 
+When `expected` is missing, the probe asks whether `KicksLiveness.install!` was
+called before the runner started. This is a hint, not a diagnosis: a slow boot
+or a removed marks directory can produce the same result. It does not install
+hooks or change the failing exit status. The complete output is shown in the
+[image check](KUBERNETES.md#where-your-image-puts-its-gems).
+
+When migrating from another probe, confirm the `[liveness] slot 0: started:`
+line and the `expected` file on dev before removing the old probe gem, its
+initializer and its rake tasks.
+
 Once workers are running, the marks directory is the other half of the answer:
 
 ```

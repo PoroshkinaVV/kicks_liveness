@@ -37,9 +37,7 @@ class AlphaWorker
     Sneakers.logger.info("[alpha] #{message}")
     if message == 'block-drain'
       sleep 0.1 until File.exist?('/opt/app/tmp/release-drain')
-    elsif message == 'delay-drain'
-      sleep 8
-      Sneakers.logger.info('[alpha] delay-drain complete')
+      Sneakers.logger.info('[alpha] block-drain released')
     end
     ack!
   end
