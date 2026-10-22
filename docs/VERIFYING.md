@@ -292,6 +292,22 @@ Ruby 3.4.11, Kicks 3.4.0, Bunny 3.4.0 and the openssl gem 4.0.2, using an image
 built with `--no-cache --pull`. The stuck pod's `restartCount` changed from 0
 to 1.
 
+Replayed on 2026-10-21–22 on the same cluster with Sneakers 2.11.0 /
+ServerEngine 2.0.7 and Sneakers 2.12.0 / ServerEngine 2.1.1, both on Ruby
+3.4.11 and Bunny 2.24.0: both drain paths passed, including the kubelet restart
+and restored consumers. These images used cached layers and local gem packages,
+not another clean online build.
+
+Separate manual pod-deletion checks held the job beyond `shutdown_grace=3s`,
+with `tick=1s`, `max_age=3s` and Kubernetes termination grace 20 seconds. On
+both Sneakers versions and Kicks 3.4.0, an expired mark stayed unchanged and
+both probe commands failed, but the terminating container was not restarted.
+Releasing the job after expiry let it finish with exit 0 in 10.4–11.6 seconds
+from deletion; leaving it blocked caused kubelet to kill it with exit 137 in
+20.8–20.9 seconds. Each run logged expiry once and recovered a healthy
+replacement. The expiry ERROR is expected with this deliberately shorter
+exemption; normal deployments should keep it at least as long as pod grace.
+
 ### 7. Bad broker credentials
 
 Point `AMQP_URL` at a wrong password. The fork cannot subscribe, so the
@@ -517,6 +533,7 @@ an increased `restartCount`, exit 137, a surviving volume witness, a changed
 generation, one replacement `started:` line without inherited escalation, and
 a healthy probe; the original deployment is restored afterwards. On the
 environment recorded in scenario 6, all checks passed with `restartCount=0->1`.
+The same check also passed for both Sneakers versions recorded there.
 The Docker form was also rerun: PID 1 start time changed from 1515589 to 1515784
 with mount namespace inode 4026534862 unchanged; inherited marks were rejected
 until the delayed replacement writer published.
