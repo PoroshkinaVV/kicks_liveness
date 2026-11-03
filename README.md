@@ -77,6 +77,9 @@ only when every expected worker mark is present and fresh.
 Use a startup probe for the boot budget and a liveness probe for steady state:
 
 ```yaml
+        env:
+          - name: KICKS_LIVENESS_SHUTDOWN_GRACE
+            value: "60"           # at least terminationGracePeriodSeconds
         startupProbe:
           exec:
             command: ["bundle", "exec", "kicks-liveness"]
@@ -139,6 +142,7 @@ environment too:
 | `KICKS_LIVENESS_DIR` | `/opt/app/tmp/health` | heartbeat directory; must be on tmpfs | uses the default |
 | `KICKS_LIVENESS_MAX_AGE` | `45` | seconds before a mark is stale | uses the default |
 | `KICKS_LIVENESS_TICK` | `10` | seconds between worker checks | uses the default, then the safety fallback below if needed |
+| `KICKS_LIVENESS_SHUTDOWN_GRACE` | `60` | seconds to keep publishing during shutdown | uses the default |
 
 If the effective environment tick is not smaller than `max_age`, the worker
 writes a WARN to stderr and uses `10` seconds when that is safe, or half of
@@ -146,9 +150,15 @@ writes a WARN to stderr and uses `10` seconds when that is safe, or half of
 while guaranteeing that a healthy heartbeat cannot become stale between
 ordinary ticks.
 
-An initializer value for `tick` wins over `KICKS_LIVENESS_TICK`. `dir` and
+Initializer values for `tick` and `shutdown_grace` override their environment
+variables. `dir` and
 `max_age` deliberately have no initializer setters: allowing two configuration
 sources could make the worker and probe silently disagree.
+
+Set `shutdown_grace` to at least `terminationGracePeriodSeconds`. A drain that
+exceeds this deadline stops refreshing its heartbeat and logs one ERROR; the
+probe fails once the last mark becomes stale. See
+[shutdown timing](docs/LIMITATIONS.md#graceful-shutdown-has-a-finite-heartbeat-exemption).
 
 If two runners share one pod — for example `sneakers:run` and
 `sneakers:active_job` — give each a different `KICKS_LIVENESS_DIR`. Separate

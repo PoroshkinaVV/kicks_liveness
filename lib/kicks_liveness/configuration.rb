@@ -13,6 +13,8 @@ module KicksLiveness
     DEFAULT_TICK = 10
     # @return [Integer] unhealthy ticks tolerated at startup before one ERROR
     DEFAULT_STARTUP_GRACE_TICKS = 6
+    # @return [Integer] seconds to keep publishing while the workers drain
+    DEFAULT_SHUTDOWN_GRACE = 60
 
     # Seconds between checks. An incompatibility warning for an environment
     # fallback is delayed until this value is actually used, so an initializer
@@ -24,6 +26,8 @@ module KicksLiveness
     end
     # @return [Integer] unhealthy ticks tolerated at startup before one ERROR
     attr_reader :startup_grace_ticks
+    # @return [Numeric] seconds allowed for graceful shutdown, measured monotonically
+    attr_reader :shutdown_grace
     # @return [Logger, nil] explicit logger; defaults to +Sneakers.logger+
     attr_accessor :logger
     # @param value [Boolean] set false to start no monitor thread, e.g. in tests
@@ -34,6 +38,7 @@ module KicksLiveness
       @enabled = true
       @logger = nil
       @tick = environment_tick
+      @shutdown_grace = Heartbeat.env_int(:shutdown_grace, DEFAULT_SHUTDOWN_GRACE)
     end
 
     # @return [Boolean]
@@ -68,6 +73,21 @@ module KicksLiveness
       end
 
       @startup_grace_ticks = ticks
+    end
+
+    # Only the monitor reads this value, so an initializer may override the
+    # environment. Keep it at least as long as terminationGracePeriodSeconds.
+    # An infinite value would restore the unbounded shutdown exemption.
+    #
+    # @param seconds [Numeric] finite, positive duration
+    # @raise [ArgumentError] unless +seconds+ is a positive finite real number
+    # @return [Numeric]
+    def shutdown_grace=(seconds)
+      unless seconds.is_a?(Numeric) && seconds.real? && seconds.finite? && seconds.positive?
+        raise ArgumentError, "shutdown_grace must be a positive finite number, got #{seconds.inspect}"
+      end
+
+      @shutdown_grace = seconds
     end
 
     # Read-only, sourced from the environment so that it matches what the probe

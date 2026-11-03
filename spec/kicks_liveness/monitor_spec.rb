@@ -123,7 +123,13 @@ RSpec.describe KicksLiveness::Monitor do
   # the longest in-flight job takes. Reporting that as a fault would put an
   # ERROR in the log on every single deploy.
   describe 'during a graceful shutdown' do
+    def monotonic_time(seconds)
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(seconds)
+    end
+
     before do
+      allow(Process).to receive(:clock_gettime).and_call_original
+      monotonic_time(100.0)
       healthy!
       heartbeat.declare!(1)
       monitor.tick!
@@ -153,6 +159,68 @@ RSpec.describe KicksLiveness::Monitor do
       3.times { monitor.tick! }
 
       expect(logger.lines.count { |_, message| message.include?('shutting down') }).to eq(1)
+    end
+
+    it 'refreshes until just before the deadline without checking consumers' do
+      monotonic_time(159.9)
+
+      expect(monitor.tick!).to be(true)
+      expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
+      expect(errors).to be_empty
+      expect(KicksLiveness::Registry).to have_received(:healthy?).once
+    end
+
+    it 'stops refreshing at the deadline even when the first shutdown tick was delayed' do
+      original = File.stat(File.join(heartbeat.dir, 'worker-0')).mtime
+      monotonic_time(160.0)
+
+      expect(monitor.tick!).to be(false)
+      expect(File.stat(File.join(heartbeat.dir, 'worker-0')).mtime).to eq(original)
+      expect(heartbeat.check(now: original + 46)).to eq([false, 'worker-0 stale 46s > 45s'])
+      expect(errors.map(&:last)).to eq(['[liveness] slot 0: shutdown grace expired: heartbeat is no longer refreshed'])
+    end
+
+    it 'does not renew the deadline or repeat logs on repeated stop callbacks' do
+      monitor.tick!
+      monotonic_time(150.0)
+      KicksLiveness::Registry.stopping!
+      monitor.tick!
+      monotonic_time(160.0)
+
+      expect(Array.new(3) { monitor.tick! }).to all(be(false))
+      expect(errors.size).to eq(1)
+      expect(logger.lines.count { |_, message| message.include?('shutting down') }).to eq(1)
+    end
+
+    it 'keeps declaring the fork count after expiry without recreating a missing mark' do
+      monotonic_time(160.0)
+      FileUtils.remove_entry(heartbeat.dir)
+
+      expect(monitor.tick!).to be(false)
+      expect(File.read(File.join(heartbeat.dir, 'expected'))).to eq('1')
+      expect(heartbeat.check).to eq([false, 'worker-0 missing'])
+    end
+
+    it 'uses the configured grace and cannot resume publishing after expiry' do
+      config.shutdown_grace = 5
+      monotonic_time(105.0)
+
+      expect(monitor.tick!).to be(false)
+      config.shutdown_grace = 120
+      healthy!
+      expect(monitor.tick!).to be(false)
+    end
+
+    [-3600, 3600].each do |jump|
+      it "keeps the monotonic deadline when the wall clock jumps #{jump}s" do
+        wall_time = Time.now + jump
+        allow(Time).to receive(:now).and_return(wall_time)
+        monotonic_time(159.0)
+
+        expect(monitor.tick!).to be(true)
+        monotonic_time(160.0)
+        expect(monitor.tick!).to be(false)
+      end
     end
   end
 
@@ -408,6 +476,24 @@ RSpec.describe KicksLiveness::Monitor do
 
       monitor.tick!
 
+      expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
+    end
+  end
+
+  describe 'a replacement fork after a shutdown' do
+    it 'does not inherit the stopped sibling deadline through the shared marks directory' do
+      healthy!
+      monitor.tick!
+      config.shutdown_grace = 1
+      stopped_pid = fork do
+        allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(100.0, 101.0)
+        KicksLiveness::Registry.stopping!
+        exit!(monitor.tick! ? 1 : 0)
+      end
+      expect(Process.wait2(stopped_pid).last.exitstatus).to eq(0)
+
+      replacement_pid = fork { exit!(monitor.tick! ? 0 : 1) }
+      expect(Process.wait2(replacement_pid).last.exitstatus).to eq(0)
       expect(heartbeat.check).to eq([true, '1 process(es) healthy'])
     end
   end

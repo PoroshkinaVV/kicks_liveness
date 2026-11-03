@@ -6,6 +6,11 @@ RSpec.describe 'liveness probe' do
   let(:dir) { File.join(tmp, 'health') }
   let(:lib) { File.expand_path('../lib', __dir__) }
 
+  def not_started_message
+    "no #{File.join(dir, 'expected')}: worker has not started yet " \
+      '(is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)'
+  end
+
   after { FileUtils.remove_entry(tmp) }
 
   def run_probe(require_path: 'kicks_liveness/probe', env: {})
@@ -45,7 +50,26 @@ RSpec.describe 'liveness probe' do
   end
 
   it 'exits one and prints the reason when the worker has not started' do
-    expect(run_probe).to eq(["no #{File.join(dir, 'expected')}: worker has not started yet", 1])
+    expect(run_probe).to eq([not_started_message, 1])
+  end
+
+  it 'prints the hint without loading RubyGems or the application' do
+    expect(run_probe(env: { 'RUBYOPT' => '--disable-gems' })).to eq([not_started_message, 1])
+  end
+
+  it 'prints the same hint after the marks directory is removed without recreating it' do
+    healthy_marks!
+    FileUtils.remove_entry(dir)
+
+    expect(run_probe).to eq([not_started_message, 1])
+    expect(Dir).not_to exist(dir)
+  end
+
+  it 'still exits one with the hint when only expected is missing and the marks are fresh' do
+    healthy_marks!
+    File.unlink(File.join(dir, 'expected'))
+
+    expect(run_probe).to eq([not_started_message, 1])
   end
 
   it 'pulls in no bundler and requires neither kicks nor sneakers' do
@@ -54,6 +78,28 @@ RSpec.describe 'liveness probe' do
     _message, code = run_probe(env: { 'RUBYOPT' => '--disable-gems' })
 
     expect(code).to eq(0)
+  end
+
+  describe 'an expired shutdown grace' do
+    let(:heartbeat) { healthy_marks! }
+    let(:monitor) do
+      KicksLiveness::Monitor.new(slot: 0, processes: 1, consumers: 1, config: KicksLiveness.config, heartbeat: heartbeat)
+    end
+
+    it 'leaves the probe green until the last mark becomes stale, then exits one' do
+      allow(Process).to receive(:clock_gettime).and_call_original
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(100.0, 160.0)
+      KicksLiveness::Registry.stopping!
+
+      expect(monitor.tick!).to be(false)
+      expect(run_probe).to eq(['1 process(es) healthy', 0])
+      stale = Time.now - 46
+      File.utime(stale, stale, File.join(dir, 'worker-0'))
+      expect(monitor.tick!).to be(false)
+      message, code = run_probe
+      expect(code).to eq(1)
+      expect(message).to match(/\Aworker-0 stale \d+s > 45s\z/)
+    end
   end
 
   # The packaged entry point, against the production generation rather than an

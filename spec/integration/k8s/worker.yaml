@@ -31,6 +31,9 @@ spec:
             # the rake task turns it into config[:workers].
             - name: WORKER_COUNT
               value: "1"
+            # Keep aligned with terminationGracePeriodSeconds above.
+            - name: KICKS_LIVENESS_SHUTDOWN_GRACE
+              value: "60"
 
           startupProbe:
             exec:

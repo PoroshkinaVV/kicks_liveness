@@ -3,6 +3,9 @@
 ## Manifest
 
 ```yaml
+        env:
+          - name: KICKS_LIVENESS_SHUTDOWN_GRACE
+            value: "60"           # at least terminationGracePeriodSeconds
         startupProbe:
           exec:
             command: ["bundle", "exec", "kicks-liveness"]
@@ -142,11 +145,17 @@ image. One line, no cluster needed:
 docker run --rm your-image ruby -e "require 'kicks_liveness/probe'"
 ```
 
-A line like `no /opt/app/tmp/health/expected: worker has not started yet` and
-exit 1 means the plain command works — the probe found itself and correctly
-reported that no worker is running. A `LoadError` means it does not: keep
-`bundle exec kicks-liveness`, or use the explicit-path optimisation below. Do
-not put the plain command in a manifest without this check: its failure mode is
+With no worker running, exit 1 and the following line mean the plain command
+works — the probe loaded and found no declared worker count:
+
+```
+no /opt/app/tmp/health/expected: worker has not started yet (is KicksLiveness.install! called before the runner starts? outside Rails it is not automatic)
+```
+
+The question is a [setup hint](SETUP.md#checking-that-the-hooks-are-in-place),
+not proof of missing installation. A `LoadError` means the command does not
+work: keep `bundle exec kicks-liveness`, or use the explicit-path optimisation
+below. Do not put the plain command in a manifest without this check: its failure mode is
 a pod that never passes `startupProbe` and lands in `CrashLoopBackOff`.
 
 What decides it is whether Bundler installed into `GEM_HOME` or somewhere of
@@ -313,6 +322,15 @@ several consumers per worker these add up. If the grace period is shorter than
 that, the container is SIGKILLed mid-shutdown and in-flight messages are
 redelivered.
 
+Set `KICKS_LIVENESS_SHUTDOWN_GRACE` (or `config.shutdown_grace`) to at least
+`terminationGracePeriodSeconds`; both are 60 seconds in the example. The
+monitor keeps the mark fresh only within that shutdown grace. For a SIGTERM
+sent outside pod deletion, a stuck drain stops publishing at the deadline;
+its last mark then has to exceed `max_age`, followed by the liveness probe's
+period and failure threshold. Under normal clock progression, restart
+eligibility is bounded by `shutdown_grace + max_age`, with the probe budget
+additional. During pod deletion the kubelet still owns the termination deadline.
+
 ## Environment variables
 
 | Variable | Default | Purpose | Invalid or blank value |
@@ -320,6 +338,7 @@ redelivered.
 | `KICKS_LIVENESS_DIR` | `/opt/app/tmp/health` | marks directory, **must be on tmpfs** | uses the default |
 | `KICKS_LIVENESS_MAX_AGE` | `45` | seconds after which a mark is stale | uses the default |
 | `KICKS_LIVENESS_TICK` | `10` | interval between ticks | uses the default, then the safety fallback below if needed |
+| `KICKS_LIVENESS_SHUTDOWN_GRACE` | `60` | seconds to keep publishing during shutdown; at least `terminationGracePeriodSeconds` | uses the default |
 
 Keep `tick` well below `max_age`. A tick longer than half of `max_age` leaves no
 room for a single missed write, and a tick longer than `max_age` guarantees a

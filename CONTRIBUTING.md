@@ -81,6 +81,8 @@ spec/integration/verify.sh status    # print and verify the exact target
 spec/integration/verify.sh up        # namespace, broker, worker
 spec/integration/verify.sh probe     # runs the probe both ways, prints exit codes
 spec/integration/verify.sh marks     # lists the heartbeat files
+spec/integration/verify.sh shutdown  # ordinary and stuck drain, Kubernetes
+spec/integration/verify.sh container-restart  # same-pod restart, Kubernetes
 spec/integration/verify.sh generation-restart  # container restart, Docker only
 spec/integration/verify.sh topology  # the PID topology matrix, Docker only
 spec/integration/verify.sh logs [n]  # worker logs

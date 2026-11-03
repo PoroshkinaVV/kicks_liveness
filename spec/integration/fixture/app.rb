@@ -22,6 +22,10 @@ Sneakers.logger.level = Logger::INFO
 
 KicksLiveness.install!
 
+# ServerEngine owns USR2 (reload). This otherwise unused, handled signal lets
+# the fixture's PID 1 end itself; an in-namespace SIGKILL would be ignored.
+Signal.trap('WINCH') { exit!(137) }
+
 # Two real consumers on two real queues: the health predicate reads
 # `worker.queue.channel`, so a stubbed worker would check nothing.
 class AlphaWorker
@@ -31,6 +35,10 @@ class AlphaWorker
 
   def work(message)
     Sneakers.logger.info("[alpha] #{message}")
+    if message == 'block-drain'
+      sleep 0.1 until File.exist?('/opt/app/tmp/release-drain')
+      Sneakers.logger.info('[alpha] block-drain released')
+    end
     ack!
   end
 end

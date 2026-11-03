@@ -5,6 +5,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-03
+
+### Fixed
+
+- Bound the graceful-shutdown heartbeat exemption by a monotonic deadline
+  starting at the first stop notification; repeated callbacks cannot extend it.
+  At expiry the monitor logs one ERROR and stops refreshing its mark, but still
+  declares the fork count. A stuck drain then fails the ordinary freshness
+  check; the monitor does not kill the process.
+
+### Added
+
+- Add `shutdown_grace` / `KICKS_LIVENESS_SHUTDOWN_GRACE` (default 60 seconds;
+  initializer wins). Set it to at least `terminationGracePeriodSeconds`.
+  Restart still waits for mark staleness and the kubelet's probe failure budget.
+- Add `verify.sh shutdown` and `container-restart` to check a real drain and
+  same-pod container replacement, with deployment restoration afterwards.
+- Add an `install!` setup hint when the probe finds no declared worker count.
+  It remains a failing check, not proof that the hooks were never installed.
+
 ## [0.1.3] - 2026-10-21
 
 ### Fixed
@@ -124,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [docs/](https://github.com/PoroshkinaVV/kicks_liveness/tree/main/docs); start
   with `SETUP.md`, and read `LIMITATIONS.md` before relying on it.
 
-[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/PoroshkinaVV/kicks_liveness/compare/v0.1.0...v0.1.1

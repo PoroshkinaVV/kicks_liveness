@@ -9,7 +9,7 @@ module KicksLiveness
     # Initialised at file-load time: single-threaded, and before any fork.
     @workers = []
     @mutex = Mutex.new
-    @stopping = false
+    @stopping_at = nil
 
     class << self
       # Records a worker as subscribed.
@@ -36,13 +36,23 @@ module KicksLiveness
       # Mark deliberate shutdown before unsubscription changes the predicate.
       #
       # @return [true]
-      def stopping!
-        @stopping = true
+      def stopping! # rubocop:disable Naming/PredicateMethod -- Records the stop notification.
+        @mutex.synchronize { @stopping_at ||= Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+        true
       end
 
       # @return [Boolean] whether shutdown has begun
       def stopping?
-        @stopping
+        !stopping_at.nil?
+      end
+
+      # Captured by the first stop callback, even if the monitor's next tick is
+      # delayed. Repeated callbacks cannot extend the shutdown exemption. This
+      # is process-local: a sibling replacement fork has not been asked to stop.
+      #
+      # @return [Float, nil] monotonic time of the first stop notification
+      def stopping_at
+        @mutex.synchronize { @stopping_at }
       end
 
       # Whether this process is consuming everything it is supposed to consume.

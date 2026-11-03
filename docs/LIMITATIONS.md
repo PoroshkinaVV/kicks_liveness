@@ -70,29 +70,38 @@ flapping pod rather than a storm. And the supervisor respawning failing forks
 inside the container — which is *not* throttled by anything — is now reported:
 see the respawn escalation below.
 
-## Graceful shutdown is safe only when something else owns the deadline
+## Graceful shutdown has a finite heartbeat exemption
 
-`Registry.stopping!` suspends the consumer predicate before `WorkerGroup#stop`
-unsubscribes workers and drains their pools. The monitor keeps the heartbeat
-fresh for the rest of the process so liveness does not interrupt an in-flight
-job. During pod deletion the kubelet enforces `terminationGracePeriodSeconds`,
-which bounds this exemption externally.
+`Sneakers::WorkerGroup#stop` removes consumers before waiting for their thread
+pools to drain. `Registry.stopping!` therefore suspends the consumer predicate
+before the first worker stops, allowing an orderly drain to keep its heartbeat
+fresh without reporting a consumer failure on every deploy.
 
-A SIGTERM from an operator, sidecar, or internal supervisor enters the same
-path without deleting the pod. If Sneakers or Bunny then drains or reconnects
-indefinitely, the heartbeat stays fresh with zero consumers and the pod can
-remain Ready forever. The process cannot infer an external deadline from the
-signal.
+The exemption lasts for `shutdown_grace` seconds from the first stop callback
+(default 60). Set `KICKS_LIVENESS_SHUTDOWN_GRACE` or `config.shutdown_grace` to at
+least the deployment's `terminationGracePeriodSeconds`. During pod deletion the
+kubelet still owns the outer termination deadline. The gem cannot determine
+whether a SIGTERM came from the kubelet, an operator, or another process.
 
-This is existing shutdown behaviour, not a 0.1.3 regression. Until the exemption
-is bounded — planned for 0.1.4 — send SIGTERM only through a termination path
-that has its own enforced deadline. Use pod deletion for Kubernetes operations.
-An internal supervisor must eventually make PID 1 exit itself, or ask the
-container runtime to stop it, if graceful shutdown does not complete; an
-in-namespace `kill -9 1` is not a reliable escalation even when `kill` reports
-success. Keep the external consumer alert enabled as well: it still sees the
-zero-consumer state that the process-local predicate has intentionally stopped
-evaluating.
+At the deadline, the monitor logs one ERROR and stops refreshing the slot mark.
+It keeps declaring the expected fork count, so an existing mark eventually
+fails as `worker-<slot> stale`, rather than claiming that the worker never
+started. The monitor does not kill the process or resume checking consumers.
+This bounds the formerly indefinite healthy result when an out-of-band SIGTERM
+leaves a process stuck draining with no consumers.
+
+Expiry is not an immediate probe failure: the last mark must still exceed
+`max_age`. Under normal clock progression, the bound from stop notification to
+restart eligibility is `shutdown_grace + max_age`; actual restart also depends
+on the probe period and failure threshold. The first stop time and deadline are
+process-local, so repeated stop callbacks do not renew them and a sibling
+replacement fork starts without them.
+
+The deadline uses the monotonic clock. A wall-clock jump cannot shorten or
+extend the exemption, but it can change mark staleness: the probe still compares
+filesystem mtime with wall time. Keep the external consumer alert enabled; the
+shutdown grace and the probe budget deliberately allow a period with no
+consumers before a restart.
 
 ## Changing the worker count at runtime is not supported
 

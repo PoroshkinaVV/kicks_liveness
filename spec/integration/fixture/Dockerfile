@@ -15,11 +15,12 @@ ENV LANG=C.UTF-8 \
 
 WORKDIR /opt/app
 
-# bunny pulls sorted_set, which pulls rbtree, a native extension, and the slim
-# image ships no compiler. Installed before the gems and purged after them, so
-# the toolchain does not stay in the image.
+# bunny pulls sorted_set, which pulls rbtree, a native extension, and since 3.4
+# the openssl gem, whose extension needs OpenSSL headers; the slim image ships
+# neither a compiler nor the headers. Installed before the gems and purged after
+# them, so the toolchain does not stay in the image.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential && \
+    apt-get install -y --no-install-recommends build-essential libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 
@@ -51,7 +52,7 @@ COPY spec/integration/fixture ./spec/integration/fixture
 
 WORKDIR /opt/app/spec/integration/fixture
 RUN bundle install && \
-    apt-get purge -y --auto-remove build-essential
+    apt-get purge -y --auto-remove build-essential libssl-dev
 
 # `rake sneakers:run` is what docs/SETUP.md names as the supported way to boot,
 # because it is what builds the ServerEngine supervisor the hooks attach to.

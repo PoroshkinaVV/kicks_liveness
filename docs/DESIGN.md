@@ -235,19 +235,23 @@ with `respond_to?(:call)` rather than maintaining a separate queue list.
 | Setting | Where | Why |
 |---|---|---|
 | `logger`, `enabled`, `startup_grace_ticks` | application config block | only the worker needs them |
-| `tick` | either, and the config block wins | only the worker reads it, so two sources cannot contradict each other |
+| `tick`, `shutdown_grace` | either, and the config block wins | only the worker reads them, so two sources cannot contradict each other |
 | `dir`, `max_age` | environment variables **only** | the probe is a separate process |
 
 The exec probe cannot read an application initializer, so `dir` and `max_age`
 have one source: the environment. Specs reject application setters for both.
-Only the worker reads `tick`, so `config.tick` may override
-`KICKS_LIVENESS_TICK` without contradicting the probe.
+Only the worker reads `tick` and `shutdown_grace`, so initializer values may
+override their environment values without contradicting the probe.
 
 Environment durations must be positive integers; missing, empty, unparseable,
 zero, and negative values use defaults. If the effective tick is at least
 `max_age`, it warns on stderr and uses the default tick when safe, or half of
 `max_age` otherwise. The warning is deferred until the tick is read, so an
 initializer override or a disabled monitor does not produce a misleading WARN.
+
+`KICKS_LIVENESS_SHUTDOWN_GRACE` defaults to 60 seconds. Its initializer override
+accepts positive finite real numbers. Set it to at least the deployment's
+`terminationGracePeriodSeconds`, which the gem cannot discover from a signal.
 
 Invalid ConfigMap input falls back so a deployment typo does not prevent worker
 startup. Initializer values are application code: invalid values raise
@@ -288,8 +292,12 @@ Loop and startup exceptions do not use that flag.
 
 ERROR must survive the usual error-level logger filter, while normal startup
 and deliberate shutdown remain INFO. On shutdown the monitor suspends its
-predicate and refreshes the mark for the rest of the process, assuming an
-[external deadline](LIMITATIONS.md#graceful-shutdown-is-safe-only-when-something-else-owns-the-deadline).
+predicate until a monotonic deadline: the first `Registry.stopping!` records the
+stop time, and the monitor adds `shutdown_grace`. A delayed tick or repeated
+callback cannot renew it. At expiry it logs one ERROR and stops `touch!` while
+continuing `declare!`. Nothing is persisted, so a replacement fork does not
+inherit a sibling's shutdown. Mark freshness still uses wall time; see the
+[timing boundary](LIMITATIONS.md#graceful-shutdown-has-a-finite-heartbeat-exemption).
 
 Startup grace postpones the error for a slow initial subscription; a surviving
 monitor reports once when it expires. Fork-respawn loops use the persistent

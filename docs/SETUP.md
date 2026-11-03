@@ -148,9 +148,18 @@ config.logger = Rails.logger
 | `enabled` | `true` | start the monitor thread | `true` or `false` |
 | `tick` | `10` | seconds between checks | positive number smaller than `max_age` |
 | `startup_grace_ticks` | `6` | unhealthy startup ticks before one ERROR | positive integer |
+| `shutdown_grace` | `60` | seconds to keep publishing during shutdown | positive finite number |
 
 Invalid combinations are rejected before the monitor starts instead of running
 one that is guaranteed to publish stale marks or never report a stalled startup.
+
+`shutdown_grace` defaults from `KICKS_LIVENESS_SHUTDOWN_GRACE`; the initializer
+wins when both are set. Set it to at least your Kubernetes
+`terminationGracePeriodSeconds`. It bounds the shutdown exemption, not the
+restart time: after expiry the last mark still has to exceed `max_age` and the
+probe's failure budget still applies. The environment accepts positive integer
+seconds and silently uses 60 for invalid or blank values. Invalid initializer
+values raise `ArgumentError`; fractional positive seconds are accepted.
 
 `dir` and `max_age` are **not** here — they come from environment variables
 only. See
@@ -168,6 +177,16 @@ Sneakers::WorkerGroup.ancestors.include?(KicksLiveness::Hooks::WorkerGroup) # =>
 
 Both must be `true` before the runner starts. If either is `false`, either
 `install!` has not run, or it ran before `kicks`/`sneakers` was loaded.
+
+When `expected` is missing, the probe asks whether `KicksLiveness.install!` was
+called before the runner started. This is a hint, not a diagnosis: a slow boot
+or a removed marks directory can produce the same result. It does not install
+hooks or change the failing exit status. The complete output is shown in the
+[image check](KUBERNETES.md#where-your-image-puts-its-gems).
+
+When migrating from another probe, confirm the `[liveness] slot 0: started:`
+line and the `expected` file on dev before removing the old probe gem, its
+initializer and its rake tasks.
 
 Once workers are running, the marks directory is the other half of the answer:
 
